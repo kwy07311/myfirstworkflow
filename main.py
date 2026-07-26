@@ -66,6 +66,96 @@ logging.basicConfig(
 # 매매기법 정의 구역
 # =========================================================
 
+def calculate_double_bollinger_bands(df, wb_period=4, wb_std=4, bb_period=20, bb_std=2):
+    """
+    더블 볼린저 밴드 지표 계산.
+    - WB(4,4): 시가(Open) 기준, 단기 극한 변곡·돌파 포착용
+    - 기본 BB(20,2): 종가(Close) 기준, 표준 레인지/평균회귀 기준
+    """
+    out = df.copy()
+
+    wb_source = out['Open'].astype(float)
+    wb_ma = wb_source.rolling(window=wb_period).mean()
+    wb_stdval = wb_source.rolling(window=wb_period).std()
+    out['WB_Mid'] = wb_ma
+    out['WB_Upper'] = wb_ma + wb_std * wb_stdval
+    out['WB_Lower'] = wb_ma - wb_std * wb_stdval
+
+    bb_source = out['Close'].astype(float)
+    bb_ma = bb_source.rolling(window=bb_period).mean()
+    bb_stdval = bb_source.rolling(window=bb_period).std()
+    out['BB_Mid'] = bb_ma
+    out['BB_Upper'] = bb_ma + bb_std * bb_stdval
+    out['BB_Lower'] = bb_ma - bb_std * bb_stdval
+
+    return out
+
+
+def has_double_bollinger_buy_signal(
+    ohlcv_df,
+    wb_period=4, wb_std=4, bb_period=20, bb_std=2,
+    resistance_lookback=20, wick_ratio_threshold=1.5, support_tolerance_pct=1.0,
+) -> bool:
+    """
+    [더블 볼린저 밴드(WB) 매매법] - 유튜브 '김직선 - 나스닥 트레이더' 채널
+    https://www.youtube.com/watch?v=t800Joz9GHw
+
+    WB(4,4,Open,빨간선) + 기본 볼린저(20,2,Close,흰선)를 함께 써서
+    매수 관점에서 아래 두 패턴 중 하나라도 만족하면 True.
+
+    [패턴 A] 하단 변곡(반전) 매수
+      - 오늘 저가가 WB 하단 또는 BB 하단을 터치/이탈
+      - 종가는 두 밴드 안쪽으로 복귀 (아래꼬리 긴 반전 마감)
+      - 직전 저가(매물대) 대비 유의미한 신저가를 만들지 않음 (돌파 실패 확인)
+
+    [패턴 B] 상단 진짜 돌파 후 추세 매수
+      - 몸통(시가->종가)이 WB 상단과 BB 상단을 모두 꽉 채우며 강하게 돌파
+      - 직전 고점(매물대, resistance_lookback일 종가 최고가)도 종가 기준 함께 돌파
+
+    데이터 부족 시 조용히 False 반환.
+    """
+    min_len = max(wb_period, bb_period, resistance_lookback) + 2
+    if ohlcv_df is None or len(ohlcv_df) < min_len:
+        return False
+
+    df = calculate_double_bollinger_bands(ohlcv_df, wb_period, wb_std, bb_period, bb_std)
+
+    today = df.iloc[-1]
+
+    if pd.isna(today['WB_Lower']) or pd.isna(today['BB_Lower']):
+        return False
+
+    # ---------- 패턴 A: 하단 변곡(반전) 매수 ----------
+    touched_lower_band = (today['Low'] <= today['WB_Lower']) or (today['Low'] <= today['BB_Lower'])
+    closed_back_inside = (today['Close'] > today['WB_Lower']) and (today['Close'] > today['BB_Lower'])
+
+    body_high = max(today['Open'], today['Close'])
+    body_low = min(today['Open'], today['Close'])
+    body_size = body_high - body_low
+    lower_wick = body_low - today['Low']
+    has_long_lower_wick = body_size > 0 and (lower_wick > body_size * wick_ratio_threshold)
+
+    prior_low = df['Low'].iloc[-(resistance_lookback + 1):-1].min()
+    support_not_broken = today['Low'] >= prior_low * (1 - support_tolerance_pct / 100)
+
+    reversal_pattern = bool(
+        touched_lower_band and closed_back_inside and has_long_lower_wick and support_not_broken
+    )
+
+    # ---------- 패턴 B: 상단 진짜 돌파 후 추세 매수 ----------
+    body_breaks_both_bands = (
+        (today['Open'] <= today['WB_Upper']) and (today['Close'] > today['WB_Upper'])
+        and (today['Open'] <= today['BB_Upper']) and (today['Close'] > today['BB_Upper'])
+    )
+
+    prior_high_close = df['Close'].iloc[-(resistance_lookback + 1):-1].max()
+    breaks_resistance = today['Close'] > prior_high_close
+
+    breakout_pattern = bool(body_breaks_both_bands and breaks_resistance)
+
+    return reversal_pattern or breakout_pattern
+  
+
 def has_candle_ma_breakout_signal(ohlcv_df, volume_multiplier=1.5) -> bool:
     """
     [기존 1차 조건] 오늘 양봉이면서 시가는 MA5/MA20 아래, 종가는 MA5/MA20 위로 돌파,
@@ -220,6 +310,7 @@ CONFIRMATION_TECHNIQUES = [
     ("MACD", has_macd_buy_signal),
     ("볼린저밴드+RSI", has_bollinger_rsi_buy_signal),
     ("정배열+장대양봉눌림목", has_pullback_after_breakout_signal),
+    ("더블볼린저밴드(WB)", has_double_bollinger_buy_signal),  # 신규 추가
 ]
 
 
