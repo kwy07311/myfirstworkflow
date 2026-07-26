@@ -2,7 +2,7 @@ name: Daily Stock Scan
 
 on:
   schedule:
-    - cron: '50 5 * * 1-5'   # UTC 05:50 = 한국시간(KST) 14:50, 월~금만 실행
+    - cron: '50 5 * * *'   # UTC 05:50 = 한국시간(KST) 14:50, 매일 실행
   workflow_dispatch:
 
 jobs:
