@@ -1,8 +1,56 @@
 """
-매일 정해진 시간에 GitHub Actions가 이 파일을 실행하면:
-1. 전 종목을 스캔해서 조건에 맞는 종목을 찾고
-2. 결과를 엑셀(.xlsx)로 저장하고 (종목명 클릭 시 네이버 차트로 이동하는 하이퍼링크 포함)
-3. 네이버 메일로 엑셀 파일을 첨부해서 보낸다.
+[개선판 - 수익률 관점 보강]
+
+원본 스캐너는 "매수 신호를 찾는 기능"만 있고, 아래처럼 수익률에 직접 영향을 주는
+요소들이 빠져 있었습니다. 이번 개선에서 추가/변경한 부분:
+
+  1. [신규] 부실/저유동성 종목 사전 제외
+     - 스팩(SPAC), 우선주, 거래대금이 너무 적은 종목은 슬리피지·변동성 리스크가 커서
+       스캔 대상에서 미리 제외합니다. (MIN_LIQUIDITY_AMOUNT 로 조절 가능)
+
+  2. [신규] ATR 기반 손절가/목표가 자동 계산
+     - 신호가 뜬 모든 종목에 대해 ATR(14) 기준으로 손절가(진입가 - 1.5*ATR),
+       목표가(진입가 + 3*ATR)를 계산해서 리스크/보상 비율(약 1:2)을 엑셀에 표시합니다.
+     - "신호는 떴는데 손절선이 어디인지 몰라서 무한정 물타기"하는 상황을 방지하기 위함.
+
+  3. [신규] 종목별 과거 신호 백테스트 (간이)
+     - 오늘 신호가 뜬 종목에 한해서만, 해당 기법이 "이 종목의" 최근 1년 데이터에서
+       과거에 몇 번 신호를 냈었고, 신호 이후 5거래일 뒤 평균 수익률/승률이 어땠는지
+       계산해서 '과거승률(%)', '평균수익률(%)', '과거신호횟수' 컬럼으로 추가합니다.
+     - 주의: 이건 "그 종목 자체의 과거 패턴 재현성"만 보는 매우 단순한 검증이며,
+       전체 시장/전체 기간에 대한 정식 백테스트가 아닙니다. 표본이 적은 종목
+       (과거신호횟수가 2~3회 이하)은 승률 수치를 신뢰하지 말고 참고만 하세요.
+     - 전 종목(약 2000개) x 250일 백테스트를 다 돌리면 스캔이 매우 느려지므로,
+       "오늘 이미 신호가 뜬 종목"에 한해서만 사후에 백테스트를 돌리는 방식으로
+       속도 저하를 최소화했습니다.
+
+  4. [신규] 시황(코스피 5일선 상회 여부) 정보를 전체 종목 공통 참고 컬럼으로 노출
+     - 원본은 기법3(신정재 종가베팅)에만 시황 조건이 있었는데, 시장 레짐 필터는
+       학계/실전 모두에서 가장 근거가 탄탄한 팩터 중 하나이므로 전체 결과에
+       '코스피시황' 컬럼으로 노출합니다. (강제 제외는 하지 않음 - 종목별로 판단해
+       하락장에서는 보수적으로 신호를 걸러 보는 용도)
+
+  6. [신규] 기법별 전체시장 백테스트 (엑셀 2번째 시트)
+     - "오늘 신호가 뜬 종목"만이 아니라 스캔 대상 전 종목에 대해, 9개 기법 각각을
+       과거 MARKET_BACKTEST_LOOKBACK(기본 90거래일, 약 4~5개월)일 구간에서 재검증하고
+       forward_days(기본 5거래일) 뒤 수익률을 계산해서, 기법별로 전체 시장 기준
+       신호횟수/승률/평균수익률을 집계합니다 (엑셀 2번째 시트 "기법별_전체시장백테스트").
+     - 네트워크 호출은 기존과 동일(종목당 1회)하고, 이미 받아온 히스토리 데이터로
+       계산만 추가로 하는 것이라 스캔 속도에 미치는 영향을 최소화했습니다.
+     - 단, 상장폐지/종목명 변경 등은 반영 못 하는 생존편향이 있고, 정식 시점별
+       유니버스 재구성 백테스트는 아니라는 한계가 있습니다 (참고용).
+     - 만약 이 요약에서 특정 기법의 전체시장 승률이 지속적으로 낮게 나온다면
+       (예: 45% 미만, 평균수익률 마이너스) CONFIRMATION_TECHNIQUES 목록에서
+       빼는 것을 고려해보세요 - 그 기법은 신호 개수만 늘릴 뿐 승률에 기여하지 않습니다.
+
+  5. [주의사항 - 코드가 해결할 수 없는 부분]
+     - 매도(청산) 타이밍, 포지션 사이징(종목당 투자 비중), 분산 투자(하루에 여러
+       종목이 잡힐 때 특정 테마/섹터 쏠림 방지)는 이 스크립트의 범위를 벗어나는
+       "운용 전략" 영역이라 자동화하지 않았습니다. 손절가/목표가는 참고용 가이드일
+       뿐이며, 반드시 본인 리스크 허용 범위에 맞게 조정해서 사용하세요.
+     - "매수신호" 개수가 많다고 승률이 비례해서 높아지는 것은 아닙니다. 여러 기법이
+       비슷한 원리(양봉+거래량 급증)를 다르게 표현한 경우가 많아 서로 상관관계가
+       높습니다. 개수보다는 과거승률/평균수익률 컬럼을 우선 참고하세요.
 
 =====================================================================
 [AI/사람 공통 안내] 새로운 매수 기법을 추가해달라는 요청을 받았다면?
@@ -74,6 +122,17 @@ logging.basicConfig(
 # 전체 시장 기준 1회 계산 파라미터 (기법2/기법3에서 사용)
 # =========================================================
 LEADING_STOCK_TOP_PCT = 0.03      # 거래대금 상위 3%를 '주도주 후보군'으로 정의
+
+# =========================================================
+# [신규] 리스크 관리 / 종목 필터링 파라미터
+# =========================================================
+MIN_LIQUIDITY_AMOUNT = 500_000_000   # 최소 거래대금(원). 이 미만 종목은 슬리피지 위험으로 제외
+ATR_PERIOD = 14
+ATR_STOP_MULT = 1.5                  # 손절 = 진입가 - ATR_STOP_MULT * ATR
+ATR_TARGET_MULT = 3.0                # 목표 = 진입가 + ATR_TARGET_MULT * ATR (약 1:2 손익비)
+BACKTEST_FORWARD_DAYS = 5            # 신호 이후 며칠 뒤 수익률로 검증할지
+MARKET_BACKTEST_LOOKBACK = 90        # [신규] 전체 시장 공통 백테스트 기간 (모든 스캔 종목에 적용, 속도 고려해 90일로 제한)
+                                      # 종목별 화면 표시용 승률/평균수익률도 이 값을 그대로 재사용한다
 
 
 # =========================================================
@@ -701,56 +760,103 @@ CONFIRMATION_TECHNIQUES = [
 ]
 
 
-def check_stock(row, start_date, end_date, market_bullish=True):
-    code = row['Code']
-    name = row['Name']
-    try:
-        df = fdr.DataReader(code, start=start_date, end=end_date)
-        if len(df) < 25:
-            return None
+# =========================================================
+# [신규] 리스크 관리 (ATR 손절/목표가) & 종목별 과거 신호 백테스트
+# =========================================================
 
-        ohlcv = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+def calculate_atr(df, period=ATR_PERIOD):
+    """
+    ATR(Average True Range) 계산. 변동성 기반 손절/목표가 산정에 사용.
+    """
+    out = df.copy()
+    prev_close = out['Close'].shift(1)
+    tr = pd.concat([
+        out['High'] - out['Low'],
+        (out['High'] - prev_close).abs(),
+        (out['Low'] - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    out['ATR'] = tr.rolling(window=period).mean()
+    return out
 
-        # ---- 기법1/2/3에서 필요한 부가 정보 주입 (전체 시장 기준 1회 계산된 값) ----
-        shares = row.get('Stocks', None)
-        if pd.notna(shares) and shares:
-            ohlcv['Shares'] = shares
-        ohlcv['IsLeading'] = bool(row.get('IsLeading', False))
-        ohlcv['MarketBullish'] = bool(market_bullish)
 
-        today = df.iloc[-1]
-        yesterday = df.iloc[-2]
+def get_risk_levels(ohlcv_df):
+    """
+    오늘 종가 기준 ATR 손절가/목표가/손익비를 계산한다.
+    데이터 부족 시 (None, None, None) 반환.
+    """
+    if ohlcv_df is None or len(ohlcv_df) < ATR_PERIOD + 2:
+        return None, None, None
 
-        matched_names = []
-        for tech_name, check_fn in CONFIRMATION_TECHNIQUES:
-            try:
-                if check_fn(ohlcv):
-                    matched_names.append(tech_name)
-            except Exception as e:
-                logging.warning(f"[{tech_name} 확인 오류] {name}({code}): {e}")
+    df_atr = calculate_atr(ohlcv_df)
+    today_close = df_atr['Close'].iloc[-1]
+    today_atr = df_atr['ATR'].iloc[-1]
 
-        if not matched_names:
-            return None
+    if pd.isna(today_atr) or today_atr <= 0:
+        return None, None, None
 
-        change_rate = round(((today['Close'] - yesterday['Close']) / yesterday['Close']) * 100, 2)
-        return {
-            '종목코드': code,
-            '종목명': name,
-            '시장': row['Market'],
-            '종가': int(today['Close']),
-            '등락률(%)': change_rate,
-            '거래량': int(today['Volume']),
-            '매수신호': len(matched_names),
-            '충족조건': ", ".join(matched_names),
-        }
-    except Exception:
-        pass
-    return None
+    stop_loss = today_close - ATR_STOP_MULT * today_atr
+    target = today_close + ATR_TARGET_MULT * today_atr
+    risk = today_close - stop_loss
+    reward = target - today_close
+    rr_ratio = round(reward / risk, 2) if risk > 0 else None
+
+    return int(round(stop_loss)), int(round(target)), rr_ratio
+
+
+def backtest_technique_raw(full_df, check_fn, forward_days=BACKTEST_FORWARD_DAYS,
+                           max_lookback=MARKET_BACKTEST_LOOKBACK):
+    """
+    [핵심 백테스트 함수] 이 종목의 과거 데이터에서 check_fn이 신호를 낸 시점들을 찾아,
+    각 신호 발생 이후 forward_days 거래일 뒤 수익률을 계산한다.
+
+    이 함수는 "종목 하나"에 대한 결과를 raw(승수, 표본수, 수익률합계)로 반환한다.
+    - 종목별로 그대로 보여주는 용도로도 쓸 수 있고,
+    - 여러 종목의 raw 결과를 그대로 더하면(wins 합, total 합, sum_returns 합)
+      "기법별 전체 시장 통합 승률/평균수익률"을 정확하게 집계할 수 있다
+      (비율을 미리 반올림해서 평균내는 방식보다 통계적으로 정확함).
+
+    주의: 상장폐지 종목 등은 반영되지 않는 생존편향이 있고, 정식 시점별 유니버스
+    재구성 백테스트는 아니다 (참고용 근사치).
+
+    반환: (wins:int, total:int, sum_returns:float) — 표본 없으면 (0, 0, 0.0)
+    """
+    n = len(full_df)
+    start_idx = max(30, n - max_lookback)
+    end_idx = n - forward_days  # 미래 데이터가 있어야 수익률 계산 가능
+    if end_idx <= start_idx:
+        return 0, 0, 0.0
+
+    wins = 0
+    total = 0
+    sum_returns = 0.0
+    for i in range(start_idx, end_idx):
+        window = full_df.iloc[:i + 1]
+        try:
+            if check_fn(window):
+                entry = full_df['Close'].iloc[i]
+                exit_price = full_df['Close'].iloc[i + forward_days]
+                if entry > 0:
+                    ret = (exit_price - entry) / entry * 100
+                    sum_returns += ret
+                    total += 1
+                    if ret > 0:
+                        wins += 1
+        except Exception:
+            continue
+
+    return wins, total, sum_returns
+
+
+def summarize_raw(wins, total, sum_returns):
+    """(wins, total, sum_returns) -> (승률%, 평균수익률%) / 표본 없으면 (None, None)"""
+    if total == 0:
+        return None, None
+    return round(wins / total * 100, 1), round(sum_returns / total, 2)
 
 
 def get_market_bullish_flag(end_date: str) -> bool:
     """
-    [기법3용] 코스피 지수가 5일 이동평균선 위에 있는지(시황 상승/반등 여부)를
+    코스피 지수가 5일 이동평균선 위에 있는지(시황 상승/반등 여부)를
     스캔 시작 전 딱 1번만 조회해서 판단한다. 조회 실패 시 안전하게 True(조건 미적용)로
     처리해서 전체 스캔이 실패하지 않도록 한다.
     """
@@ -767,13 +873,117 @@ def get_market_bullish_flag(end_date: str) -> bool:
         return True
 
 
+def check_stock(row, start_date, end_date, market_bullish=True):
+    """
+    반환값: (result_dict_or_None, tech_stats_list)
+      - result_dict_or_None: 오늘 신호가 뜬 경우에만 dict, 아니면 None (엑셀 메인 시트용)
+      - tech_stats_list: 이 종목의 9개 기법 전체에 대한 (기법명, wins, total, sum_returns) 리스트.
+        오늘 신호 매칭 여부와 무관하게 "전체 시장 기준 기법별 백테스트" 집계를 위해
+        스캔한 모든 종목에서 항상 계산한다. (네트워크 호출은 추가되지 않고, 이미 받아온
+        히스토리로 계산만 더 하는 것이라 스캔 속도에 미치는 영향을 최소화했다.)
+    """
+    code = row['Code']
+    name = row['Name']
+    empty_tech_stats = [(tech_name, 0, 0, 0.0) for tech_name, _ in CONFIRMATION_TECHNIQUES]
+    try:
+        df = fdr.DataReader(code, start=start_date, end=end_date)
+        if len(df) < 25:
+            return None, empty_tech_stats
+
+        ohlcv = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+
+        # ---- 기법1/2/3에서 필요한 부가 정보 주입 (전체 시장 기준 1회 계산된 값) ----
+        shares = row.get('Stocks', None)
+        if pd.notna(shares) and shares:
+            ohlcv['Shares'] = shares
+        ohlcv['IsLeading'] = bool(row.get('IsLeading', False))
+        ohlcv['MarketBullish'] = bool(market_bullish)
+
+        today = df.iloc[-1]
+        yesterday = df.iloc[-2]
+
+        matched_names = []
+        # ---- [신규] 이 종목에서 9개 기법 전체를 오늘 신호 + 과거 백테스트까지 한 번에 계산 ----
+        # (오늘 신호가 뜬 종목만이 아니라 전 종목에 대해 계산해서 "기법별 전체시장 백테스트"에 사용)
+        tech_stats = []
+        matched_raw = {}
+        for tech_name, check_fn in CONFIRMATION_TECHNIQUES:
+            try:
+                if check_fn(ohlcv):
+                    matched_names.append(tech_name)
+            except Exception as e:
+                logging.warning(f"[{tech_name} 확인 오류] {name}({code}): {e}")
+
+            try:
+                wins, total, sum_returns = backtest_technique_raw(ohlcv, check_fn)
+            except Exception as e:
+                logging.warning(f"[{tech_name} 백테스트 오류] {name}({code}): {e}")
+                wins, total, sum_returns = 0, 0, 0.0
+
+            tech_stats.append((tech_name, wins, total, sum_returns))
+            if tech_name in matched_names:
+                matched_raw[tech_name] = (wins, total, sum_returns)
+
+        if not matched_names:
+            return None, tech_stats
+
+        # ---- [신규] ATR 기반 손절가/목표가 ----
+        stop_loss, target, rr_ratio = get_risk_levels(ohlcv)
+
+        # ---- 오늘 매칭된 기법들의 (이 종목 자체) 과거 백테스트 결과를 합산해서 표시 ----
+        if matched_raw:
+            total_wins = sum(w for w, t, s in matched_raw.values())
+            total_count = sum(t for w, t, s in matched_raw.values())
+            total_sum_returns = sum(s for w, t, s in matched_raw.values())
+            combined_win_rate, combined_avg_return = summarize_raw(total_wins, total_count, total_sum_returns)
+            combined_sample = total_count
+        else:
+            combined_win_rate, combined_avg_return, combined_sample = None, None, 0
+
+        change_rate = round(((today['Close'] - yesterday['Close']) / yesterday['Close']) * 100, 2)
+        result = {
+            '종목코드': code,
+            '종목명': name,
+            '시장': row['Market'],
+            '종가': int(today['Close']),
+            '등락률(%)': change_rate,
+            '거래량': int(today['Volume']),
+            '매수신호': len(matched_names),
+            '충족조건': ", ".join(matched_names),
+            '손절가': stop_loss,
+            '목표가': target,
+            '손익비': rr_ratio,
+            '과거승률(%)': combined_win_rate,
+            '평균수익률(%)': combined_avg_return,
+            '과거신호횟수': combined_sample,
+            '코스피시황': '상승' if market_bullish else '하락/조정',
+        }
+        return result, tech_stats
+    except Exception:
+        pass
+    return None, empty_tech_stats
+
+
 def fast_find_eaten_candles(max_workers=20):
     logging.info("전 종목 목록을 불러오는 중...")
     stocks = fdr.StockListing('KRX')
     stocks = stocks[stocks['Market'].isin(['KOSPI', 'KOSDAQ'])].copy()
 
+    # ---- [신규] 부실/저유동성 종목 사전 제외 ----
+    before_count = len(stocks)
+    if 'Name' in stocks.columns:
+        # 스팩(SPAC) 제외
+        stocks = stocks[~stocks['Name'].str.contains('스팩', na=False)]
+        # 우선주 제외 (이름이 '...우', '...우B', '...2우B' 등으로 끝나는 경우)
+        stocks = stocks[~stocks['Name'].str.match(r'.*\d*우[A-Z]?$', na=False)]
+    if 'Amount' in stocks.columns:
+        stocks = stocks[stocks['Amount'] >= MIN_LIQUIDITY_AMOUNT]
+    logging.info(f"부실/저유동성 종목 필터링: {before_count}개 -> {len(stocks)}개")
+
     end_date = datetime.today().strftime('%Y-%m-%d')
-    start_date = (datetime.today() - timedelta(days=200)).strftime('%Y-%m-%d')
+    # [변경] 일부 기법(예: year_high_lookback=240)이 과거 시점에서도 충분한 히스토리를
+    # 확보할 수 있도록 조회 기간을 200일 -> 400일로 확장 (전체시장 백테스트 정확도 향상 목적)
+    start_date = (datetime.today() - timedelta(days=400)).strftime('%Y-%m-%d')
 
     # ---- [기법2용] 거래대금(Amount) 상위 LEADING_STOCK_TOP_PCT 비율을 '주도주 후보군'으로 산정 ----
     # fdr.StockListing('KRX')가 이미 당일 거래대금을 담고 있어 추가 네트워크 호출이 필요 없다.
@@ -789,7 +999,10 @@ def fast_find_eaten_candles(max_workers=20):
     logging.info(f"코스피 시황(5일선 기준 상승 여부): {market_bullish}")
 
     results = []
-    logging.info(f"총 {len(stocks)}개 종목을 {max_workers}개 스레드로 탐색합니다...")
+    # [신규] 기법별 전체시장 집계용 누적 딕셔너리: {기법명: [wins합, total합, sum_returns합, 참여종목수]}
+    tech_accum = {tech_name: [0, 0, 0.0, 0] for tech_name, _ in CONFIRMATION_TECHNIQUES}
+
+    logging.info(f"총 {len(stocks)}개 종목을 {max_workers}개 스레드로 탐색합니다 (전체시장 기법 백테스트 포함)...")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
@@ -797,22 +1010,57 @@ def fast_find_eaten_candles(max_workers=20):
             for _, row in stocks.iterrows()
         ]
         for future in as_completed(futures):
-            res = future.result()
+            res, tech_stats = future.result()
             if res:
                 results.append(res)
                 logging.info(f"[1차 포착] {res['종목명']}({res['종목코드']}) | 등락률: {res['등락률(%)']}%")
 
-    return pd.DataFrame(results)
+            for tech_name, wins, total, sum_returns in tech_stats:
+                acc = tech_accum[tech_name]
+                acc[0] += wins
+                acc[1] += total
+                acc[2] += sum_returns
+                if total > 0:
+                    acc[3] += 1
+
+    df_result = pd.DataFrame(results)
+    # 과거승률이 높은 순으로 정렬(참고용) - 승률 데이터 없는 종목은 뒤로
+    if not df_result.empty and '과거승률(%)' in df_result.columns:
+        df_result = df_result.sort_values(
+            by=['과거승률(%)', '매수신호'], ascending=[False, False], na_position='last'
+        ).reset_index(drop=True)
+
+    # ---- [신규] 기법별 전체시장 백테스트 요약 테이블 ----
+    summary_rows = []
+    for tech_name, (wins, total, sum_returns, stock_count) in tech_accum.items():
+        win_rate, avg_return = summarize_raw(wins, total, sum_returns)
+        summary_rows.append({
+            '기법': tech_name,
+            '신호횟수(전체시장)': total,
+            '승률(%)': win_rate,
+            '평균수익률(%)': avg_return,
+            '신호발생종목수': stock_count,
+            '검증기간(거래일)': MARKET_BACKTEST_LOOKBACK,
+            '보유기간(거래일)': BACKTEST_FORWARD_DAYS,
+        })
+    df_technique_summary = pd.DataFrame(summary_rows).sort_values(
+        by='승률(%)', ascending=False, na_position='last'
+    ).reset_index(drop=True)
+
+    return df_result, df_technique_summary
 
 
-def save_excel(df: pd.DataFrame) -> str:
+def save_excel(df: pd.DataFrame, df_technique_summary: pd.DataFrame = None) -> str:
     save_path = os.path.join(SCRIPT_DIR, f"양봉포착_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
 
     wb = Workbook()
     ws = wb.active
     ws.title = "포착종목"
 
-    headers = ["종목명", "종목코드", "시장", "종가", "등락률(%)", "거래량", "매수신호", "충족조건"]
+    headers = [
+        "종목명", "종목코드", "시장", "종가", "등락률(%)", "거래량", "매수신호", "충족조건",
+        "손절가", "목표가", "손익비", "과거승률(%)", "평균수익률(%)", "과거신호횟수", "코스피시황",
+    ]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
@@ -822,6 +1070,9 @@ def save_excel(df: pd.DataFrame) -> str:
             ws.append([
                 row["종목명"], row["종목코드"], row["시장"],
                 row["종가"], row["등락률(%)"], row["거래량"], row["매수신호"], row["충족조건"],
+                row.get("손절가"), row.get("목표가"), row.get("손익비"),
+                row.get("과거승률(%)"), row.get("평균수익률(%)"), row.get("과거신호횟수"),
+                row.get("코스피시황"),
             ])
             r = ws.max_row
 
@@ -838,6 +1089,19 @@ def save_excel(df: pd.DataFrame) -> str:
         length = max(len(str(c.value)) for c in col_cells if c.value is not None)
         ws.column_dimensions[col_cells[0].column_letter].width = max(10, length + 4)
 
+    # ---- [신규] 2번째 시트: 기법별 전체시장 백테스트 요약 ----
+    if df_technique_summary is not None and not df_technique_summary.empty:
+        ws2 = wb.create_sheet("기법별_전체시장백테스트")
+        summary_headers = list(df_technique_summary.columns)
+        ws2.append(summary_headers)
+        for cell in ws2[1]:
+            cell.font = Font(bold=True)
+        for _, row in df_technique_summary.iterrows():
+            ws2.append([row[col] for col in summary_headers])
+        for col_cells in ws2.columns:
+            length = max(len(str(c.value)) for c in col_cells if c.value is not None)
+            ws2.column_dimensions[col_cells[0].column_letter].width = max(10, length + 4)
+
     wb.save(save_path)
     return save_path
 
@@ -852,7 +1116,13 @@ def send_mail(excel_path: str, stock_count: int):
         f"{today_str} 스캔 결과입니다.\n"
         f"총 {stock_count}개 종목이 포착되었습니다.\n"
         f"첨부된 엑셀 파일을 확인해주세요.\n"
-        f"(종목명 클릭 시 네이버 차트로, 종목코드 클릭 시 유튜브 검색으로 이동합니다)"
+        f"(종목명 클릭 시 네이버 차트로, 종목코드 클릭 시 유튜브 검색으로 이동합니다)\n"
+        f"※ '손절가/목표가'는 ATR 기반 참고치, '과거승률/평균수익률'은 해당 종목 자체의\n"
+        f"  과거 신호 재현성 참고 지표입니다(표본이 적으면 신뢰도가 낮음).\n"
+        f"※ 2번째 시트 '기법별_전체시장백테스트'에는 오늘 신호와 무관하게 스캔한 전 종목을\n"
+        f"  대상으로 각 기법이 최근 {MARKET_BACKTEST_LOOKBACK}거래일 동안 실제로 얼마나 잘 맞았는지\n"
+        f"  집계한 결과가 있습니다. 승률이 지속적으로 낮은 기법은 제외를 고려해보세요.\n"
+        f"  실제 투자 판단과 리스크 관리는 반드시 본인 책임 하에 하시기 바랍니다."
     )
 
     with open(excel_path, "rb") as f:
@@ -874,8 +1144,8 @@ def main():
     start_time = datetime.now()
     logging.info("===== 자동 실행 시작 =====")
     try:
-        df_result = fast_find_eaten_candles(max_workers=20)
-        excel_path = save_excel(df_result)
+        df_result, df_technique_summary = fast_find_eaten_candles(max_workers=20)
+        excel_path = save_excel(df_result, df_technique_summary)
         logging.info(f"엑셀 저장 완료: {excel_path}")
 
         send_mail(excel_path, len(df_result))
