@@ -510,6 +510,184 @@ def has_jsj_closing_bet_signal(
     return bool(narrow_gap and clean_candle and volume_surge and had_consolidation and market_ok)
 
 
+def calculate_swing_points(df, window=3):
+    """
+    프랙탈(fractal) 방식으로 스윙 고점/저점을 계산한다.
+    i번째 봉의 High가 좌우 window개 봉을 통틀어 유일한 최댓값이면 스윙 고점,
+    Low가 유일한 최솟값이면 스윙 저점으로 표시한다.
+    (마지막 window개 봉은 좌우 확인이 불가능해 스윙 여부를 판단하지 않는다 -
+     과거 데이터 전체를 놓고 계산하므로 미래 데이터를 미리 보는 문제는 없다.)
+    """
+    out = df.copy()
+    highs = out['High'].values
+    lows = out['Low'].values
+    n = len(out)
+    swing_high = [False] * n
+    swing_low = [False] * n
+
+    for i in range(window, n - window):
+        seg_h = highs[i - window:i + window + 1]
+        if highs[i] == seg_h.max() and (seg_h == highs[i]).sum() == 1:
+            swing_high[i] = True
+        seg_l = lows[i - window:i + window + 1]
+        if lows[i] == seg_l.min() and (seg_l == lows[i]).sum() == 1:
+            swing_low[i] = True
+
+    out['SwingHigh'] = swing_high
+    out['SwingLow'] = swing_low
+    return out
+
+
+def get_market_structure(df_with_swings, lookback=120, min_swings=2):
+    """
+    최근 lookback일(오늘 제외) 안의 확정 스윙 고점/저점 중 마지막 min_swings개를 비교해서
+    'up'(HH+HL), 'down'(LH+LL), 'sideways', 또는 스윙이 부족하면 'unknown'을 반환한다.
+    """
+    recent = df_with_swings.iloc[-(lookback + 1):-1]
+    highs = recent[recent['SwingHigh']]['High']
+    lows = recent[recent['SwingLow']]['Low']
+
+    if len(highs) < min_swings or len(lows) < min_swings:
+        return 'unknown'
+
+    last_highs = highs.iloc[-min_swings:]
+    last_lows = lows.iloc[-min_swings:]
+
+    hh = all(last_highs.iloc[i] < last_highs.iloc[i + 1] for i in range(len(last_highs) - 1))
+    hl = all(last_lows.iloc[i] < last_lows.iloc[i + 1] for i in range(len(last_lows) - 1))
+    lh = all(last_highs.iloc[i] > last_highs.iloc[i + 1] for i in range(len(last_highs) - 1))
+    ll = all(last_lows.iloc[i] > last_lows.iloc[i + 1] for i in range(len(last_lows) - 1))
+
+    if hh and hl:
+        return 'up'
+    if lh and ll:
+        return 'down'
+    return 'sideways'
+
+
+def is_near_round_number(price, tolerance_pct=0.5) -> bool:
+    """
+    가격이 심리적으로 딱 떨어지는 '라운드 피겨' 근처인지 확인한다.
+    가격대에 따라 단위를 다르게 잡는다(10만원 이상->1만원 단위, 1만원 이상->1천원 단위 ...).
+    """
+    if price is None or price <= 0:
+        return False
+    if price >= 100000:
+        step = 10000
+    elif price >= 10000:
+        step = 1000
+    elif price >= 1000:
+        step = 100
+    elif price >= 100:
+        step = 10
+    else:
+        step = 1
+
+    nearest = round(price / step) * step
+    if nearest == 0:
+        return False
+    return bool(abs(price - nearest) / price * 100 <= tolerance_pct)
+
+
+def has_price_action_pullback_signal(
+    ohlcv_df,
+    swing_window=3, structure_lookback=120, min_swings=2,
+    support_lookback=60, zone_tolerance_pct=1.5,
+    round_number_tolerance_pct=0.5,
+    pinbar_wick_ratio=2.0, volume_surge_mult=1.2,
+    require_uptrend_structure=True,
+) -> bool:
+    """
+    [프라이스 액션(Price Action) 눌림목 / SR Flip 매수 기법]
+    https://www.youtube.com/watch?v=S4DYqE9Q5Zc
+
+    다음을 종합해서, "상승추세에서 지지구간(또는 SR Flip / 라운드 피겨)까지 눌린 뒤
+    반등 캔들(핀바 또는 장악형) + 거래량 증가로 확인되는" 매수 시점을 판단한다.
+      1) 시장 구조(HH/HL 상승추세 - 스윙 고점/저점 기반, 명확한 하락추세면 제외)
+      2) 지지 구간: 최근 support_lookback일 내 스윙 저점 중 오늘 저가와 가장 가까운 값과
+         zone_tolerance_pct 이내로 근접
+      3) SR Flip: 과거 스윙 고점(저항) 중 이후 확실히 돌파(종가 기준 +2% 이상)된 레벨을
+         오늘 저가가 다시 눌러줌(저항->지지 전환 재테스트)
+      4) 라운드 피겨: 오늘 저가가 심리적 라운드 넘버 근처
+      5) 캔들 확인: 불리시 핀바(아래꼬리가 몸통의 pinbar_wick_ratio배 이상, 위꼬리는 짧음)
+         또는 불리시 장악형(오늘 양봉이 전일 음봉 몸통을 완전히 감쌈)
+      6) 거래량 동반: 오늘 거래량이 20일 평균 대비 volume_surge_mult배 이상
+
+    [주의 - 근사치임을 밝힘]
+      - '유동성/SFP'는 별도로 정밀하게 구현하지 않았고, "종가가 지지선 위로 복귀"하는
+        조건(위 2/3/4번 + 캔들 확인)으로만 근사했다. 분봉/호가 단위의 진짜 유동성 흡수
+        여부는 일봉 데이터로는 판단할 수 없다.
+      - 지지/저항 구간은 스윙 고점/저점(프랙탈) 기준 근사치이며, 사람이 차트를 보고
+        직접 긋는 정교한 구간과는 다를 수 있다.
+      - 멀티 타임프레임 분석은 하지 않는다(일봉만 사용).
+
+    데이터 부족 시 조용히 False 반환.
+    """
+    min_len = max(structure_lookback, support_lookback) + swing_window * 2 + 5
+    if ohlcv_df is None or len(ohlcv_df) < min_len:
+        return False
+
+    df = calculate_swing_points(ohlcv_df, window=swing_window)
+    today = df.iloc[-1]
+    yesterday = df.iloc[-2]
+
+    # ---------- 시장 구조 ----------
+    structure = get_market_structure(df, lookback=structure_lookback, min_swings=min_swings)
+    if require_uptrend_structure and structure == 'down':
+        return False
+
+    # ---------- 지지 구간 / SR Flip / 라운드 피겨 ----------
+    recent_for_support = df.iloc[-(support_lookback + 1):-1]
+
+    swing_lows = recent_for_support[recent_for_support['SwingLow']]['Low']
+    near_support_zone = False
+    if not swing_lows.empty:
+        nearest_low = swing_lows.loc[(swing_lows - today['Low']).abs().idxmin()]
+        near_support_zone = bool(abs(today['Low'] - nearest_low) / nearest_low * 100 <= zone_tolerance_pct)
+
+    swing_highs = recent_for_support[recent_for_support['SwingHigh']]['High']
+    sr_flip_zone = False
+    for level in swing_highs:
+        was_broken = bool((recent_for_support['Close'] > level * 1.02).any())
+        now_retesting = bool(abs(today['Low'] - level) / level * 100 <= zone_tolerance_pct)
+        if was_broken and now_retesting:
+            sr_flip_zone = True
+            break
+
+    near_round = is_near_round_number(today['Low'], tolerance_pct=round_number_tolerance_pct)
+
+    valid_zone = near_support_zone or sr_flip_zone or near_round
+    if not valid_zone:
+        return False
+
+    # ---------- 캔들 확인 (핀바 또는 장악형) ----------
+    body_size = abs(today['Close'] - today['Open'])
+    lower_wick = min(today['Open'], today['Close']) - today['Low']
+    upper_wick = today['High'] - max(today['Open'], today['Close'])
+
+    is_bullish_pinbar = bool(
+        lower_wick > 0
+        and lower_wick >= max(body_size, 1e-9) * pinbar_wick_ratio
+        and upper_wick <= lower_wick * 0.5
+        and today['Close'] >= today['Open']
+    )
+    is_bullish_engulfing = bool(
+        yesterday['Close'] < yesterday['Open']
+        and today['Close'] > today['Open']
+        and today['Open'] <= yesterday['Close']
+        and today['Close'] >= yesterday['Open']
+    )
+    confirmation_candle = is_bullish_pinbar or is_bullish_engulfing
+    if not confirmation_candle:
+        return False
+
+    # ---------- 거래량 동반 ----------
+    avg20_volume = df['Volume'].iloc[-21:-1].mean()
+    volume_confirmed = bool(today['Volume'] >= avg20_volume * volume_surge_mult)
+
+    return bool(confirmation_candle and volume_confirmed)
+
+
 CONFIRMATION_TECHNIQUES = [
     ("양봉+MA돌파+거래량", has_candle_ma_breakout_signal),
     ("MACD", has_macd_buy_signal),
@@ -519,6 +697,7 @@ CONFIRMATION_TECHNIQUES = [
     ("역대급거래량+볼린저상단강돌파", has_extreme_volume_bb_breakout_signal),  # 매매기법1
     ("주도주+거래대금상위", has_leading_stock_signal),                        # 매매기법2
     ("신정재종가베팅", has_jsj_closing_bet_signal),                           # 매매기법3
+    ("프라이스액션눌림목+SRFlip", has_price_action_pullback_signal),          # 프라이스 액션 기법
 ]
 
 
