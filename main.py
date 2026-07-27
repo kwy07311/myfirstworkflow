@@ -12,7 +12,7 @@
 
   1. has_xxx_signal(ohlcv_df, ...) -> bool  형태의 새 함수를 하나 작성한다.
      - 이 파일에서 CONFIRMATION_TECHNIQUES 바로 위에 정의된 함수들
-       (has_candle_ma_breakout_signal, has_macd_buy_signal, has_bollinger_rsi_buy_signal)이
+       (has_candle_ma_breakout_signal, has_macd_buy_signal, has_bollinger_rsi_buy_signal 등)이
        전부 이 패턴을 따르고 있으니, 그대로 복사해서 참고하면 된다.
      - 첫 번째 인자 ohlcv_df는 'Open','High','Low','Close','Volume' 컬럼을 가진 pandas
        DataFrame이며, 인덱스는 날짜(과거->최근 순), 마지막 행(iloc[-1])이 가장 최근 거래일이다.
@@ -21,11 +21,20 @@
      - 지표 계산이 필요하면 calculate_macd(), calculate_bollinger_bands(), calculate_rsi()처럼
        "계산 함수(지표 컬럼을 추가한 DataFrame 반환) + 판단 함수(bool 반환)"로 분리하는 패턴을 따른다.
      - 함수 이름과 그 위 docstring에 어떤 매매법인지, 어디서 나온 조건인지(영상 제목 등) 간단히 적어둔다.
+     - [중요] OHLCV만으로는 판단할 수 없는 정보(상장주식수, 거래대금 순위, 시장 전체 시황 등)가
+       필요하다면, check_stock()/fast_find_eaten_candles()에서 스캔 시작 전에 "전체 시장 기준 1회"만
+       계산해서 ohlcv_df에 부가 컬럼(예: 'Shares', 'IsLeading', 'MarketBullish')으로 실어서 넘긴다.
+       (아래 has_extreme_volume_bb_breakout_signal / has_leading_stock_signal /
+        has_jsj_closing_bet_signal 이 이 패턴의 예시다.) 이렇게 하면 함수 시그니처는
+       여전히 ohlcv_df 하나만 받는 형태를 유지할 수 있고, 매 종목마다 추가 API를 호출하지 않아
+       스캔 속도가 느려지지 않는다.
 
   2. 파일 하단의 CONFIRMATION_TECHNIQUES 리스트에 ("기법이름", 함수) 한 줄만 추가한다.
      기법이름은 엑셀의 '충족조건' 컬럼에 그대로 표시된다.
 
   3. 그 외 코드(check_stock, fast_find_eaten_candles, save_excel, main 등)는 절대 손댈 필요 없다.
+     (단, 위 [중요] 항목처럼 부가 컬럼이 필요한 기법을 추가할 때는 예외적으로
+      check_stock / fast_find_eaten_candles 에도 "전체 시장 1회 계산" 로직을 추가해야 한다.)
 =====================================================================
 """
 
@@ -60,6 +69,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     encoding="utf-8-sig",
 )
+
+# =========================================================
+# 전체 시장 기준 1회 계산 파라미터 (기법2/기법3에서 사용)
+# =========================================================
+LEADING_STOCK_TOP_PCT = 0.03      # 거래대금 상위 3%를 '주도주 후보군'으로 정의
 
 
 # =========================================================
@@ -154,7 +168,7 @@ def has_double_bollinger_buy_signal(
     breakout_pattern = bool(body_breaks_both_bands and breaks_resistance)
 
     return reversal_pattern or breakout_pattern
-  
+
 
 def has_candle_ma_breakout_signal(ohlcv_df, volume_multiplier=1.5) -> bool:
     """
@@ -305,16 +319,210 @@ def has_bollinger_rsi_buy_signal(ohlcv_df, bb_period=20, bb_std=2, rsi_period=14
     return bool(price_below_lower_band and rsi_oversold)
 
 
+def has_extreme_volume_bb_breakout_signal(
+    ohlcv_df,
+    bb_period=20, bb_std=1,
+    volume_surge_mult=7.0, year_high_lookback=240,
+    wick_body_ratio_max=1.0, turnover_min_pct=5.0,
+) -> bool:
+    """
+    [매매기법1] 역대급 거래량 + 볼린저(20,1) 상단 강돌파
+
+    - 역대급 거래량: 최근 year_high_lookback(기본 240봉=1년) 중 최고 거래량이거나,
+      20일 평균 거래량 대비 volume_surge_mult(기본 700%) 이상 급증.
+    - 볼린저 밴드(20,1) 상단선을 강하게 돌파하는 양봉.
+    - 캔들 모양: 위꼬리가 몸통보다 길지 않음(짧거나 비등).
+    - 회전율(거래량/상장주식수)이 높은 종목 우대.
+      * 회전율 계산에는 상장주식수가 필요하므로, check_stock()에서 ohlcv_df에
+        'Shares'(상장주식수) 컬럼을 미리 실어서 넘긴다. 'Shares' 컬럼이 없으면
+        (데이터 미제공 종목 등) 회전율 조건은 건너뛰고 나머지 조건만으로 판단한다.
+
+    데이터 부족 시 조용히 False 반환.
+    """
+    min_len = max(bb_period, 21) + 1
+    if ohlcv_df is None or len(ohlcv_df) < min_len:
+        return False
+
+    df = calculate_bollinger_bands(ohlcv_df, period=bb_period, num_std=bb_std)
+    today = df.iloc[-1]
+
+    if pd.isna(today['BB_Upper']):
+        return False
+
+    is_bullish = today['Close'] > today['Open']
+
+    # ---------- 역대급 거래량 ----------
+    vol_window = df['Volume'].iloc[-min(year_high_lookback, len(df)):]
+    is_year_high_volume = bool(today['Volume'] >= vol_window.max())
+
+    avg20_volume = df['Volume'].iloc[-21:-1].mean()
+    is_volume_surge = bool(today['Volume'] >= avg20_volume * volume_surge_mult)
+
+    extreme_volume = is_year_high_volume or is_volume_surge
+
+    # ---------- 볼린저(20,1) 상단 강돌파 ----------
+    strong_bb_breakout = bool(today['Close'] > today['BB_Upper'])
+
+    # ---------- 캔들 모양 (위꼬리 <= 몸통) ----------
+    body_size = today['Close'] - today['Open']
+    upper_wick = today['High'] - max(today['Open'], today['Close'])
+    clean_candle = bool(body_size > 0 and upper_wick <= body_size * wick_body_ratio_max)
+
+    # ---------- 회전율 (상장주식수 있을 때만 체크) ----------
+    turnover_ok = True
+    if 'Shares' in ohlcv_df.columns:
+        shares = ohlcv_df['Shares'].iloc[-1]
+        if pd.notna(shares) and shares > 0:
+            turnover_rate = today['Volume'] / shares * 100
+            turnover_ok = bool(turnover_rate >= turnover_min_pct)
+
+    return bool(is_bullish and extreme_volume and strong_bb_breakout and clean_candle and turnover_ok)
+
+
+def has_leading_stock_signal(
+    ohlcv_df,
+    benchmark_lookback=20, ma5_period=5, ma10_period=10,
+    support_tolerance_pct=2.0, close_strength_pct=70.0,
+    require_leading=True,
+) -> bool:
+    """
+    [매매기법2] 주도주(거래대금 상위) 기준봉 돌파 / 눌림목 지지
+
+    원본 기법의 "주도 테마·재료" 여부는 뉴스/공시 데이터가 없어 자동 판단이 불가능하므로
+    제외했고, 대신 '당일 거래대금 상위 종목군에 속하는지'로 대체했다.
+    (상위 그룹 판정은 fast_find_eaten_candles()에서 전체 시장을 대상으로 1회만 계산해
+     ohlcv_df에 'IsLeading' 컬럼으로 실어서 넘긴다.)
+
+    아래 두 패턴 중 하나라도 만족하면 True.
+    [패턴 A] 최근 benchmark_lookback일 내 거래량이 가장 컸던 '기준봉'의 고점을
+             오늘 종가가 강하게(고가권 마감) 돌파.
+    [패턴 B] 5일/10일 이동평균선 부근에서 지지받으며 고가권으로 마감(눌림목).
+
+    데이터 부족 또는 'IsLeading'이 아닌 종목은(require_leading=True일 때) False.
+    """
+    min_len = max(benchmark_lookback, ma10_period) + 2
+    if ohlcv_df is None or len(ohlcv_df) < min_len:
+        return False
+
+    if require_leading:
+        if 'IsLeading' not in ohlcv_df.columns or not bool(ohlcv_df['IsLeading'].iloc[-1]):
+            return False
+
+    df = ohlcv_df.copy()
+    df['MA5'] = df['Close'].rolling(window=ma5_period).mean()
+    df['MA10'] = df['Close'].rolling(window=ma10_period).mean()
+
+    today = df.iloc[-1]
+
+    day_range = today['High'] - today['Low']
+    close_position_pct = ((today['Close'] - today['Low']) / day_range * 100) if day_range > 0 else 100.0
+    strong_close = bool(close_position_pct >= close_strength_pct)
+
+    # ---------- 패턴 A: 기준봉 고점 돌파 ----------
+    recent = df.iloc[-(benchmark_lookback + 1):-1]
+    pattern_a = False
+    if not recent.empty and recent['Volume'].notna().any():
+        benchmark_idx = recent['Volume'].idxmax()
+        benchmark_high = recent.loc[benchmark_idx, 'High']
+        pattern_a = bool(today['Close'] > benchmark_high and today['Close'] > today['Open'] and strong_close)
+
+    # ---------- 패턴 B: 이동평균선 눌림목 지지 ----------
+    pattern_b = False
+    if pd.notna(today['MA5']) and pd.notna(today['MA10']):
+        near_ma_support = (
+            today['Close'] >= today['MA5'] * (1 - support_tolerance_pct / 100)
+        ) or (
+            today['Close'] >= today['MA10'] * (1 - support_tolerance_pct / 100)
+        )
+        pattern_b = bool(near_ma_support and strong_close)
+
+    return pattern_a or pattern_b
+
+
+def has_jsj_closing_bet_signal(
+    ohlcv_df,
+    new_high_lookback=120, gap_tolerance_pct=3.0,
+    upper_wick_max_pct=15.0, volume_surge_mult=3.0,
+    consolidation_period=60, consolidation_range_max_pct=20.0,
+    require_market_bullish=True,
+) -> bool:
+    """
+    [매매기법3] 신정재 종가베팅 (기술적 조건만 구현)
+
+    원문의 6가지 조건 중 아래 4가지는 OHLCV로 판단 가능해 구현했다.
+      1) 신고가/전고점 돌파
+      2) 전고점과의 이격거리가 좁음(멀리 갭 뜨지 않은 돌파)
+      3) 위꼬리가 거의 없는 깔끔한 양봉
+      4) 평소 대비 거래량 급증
+      5) 충분한 기간조정(consolidation_period일 레인지가 좁았는지) 후 상승
+
+    "재료(뉴스·테마)"는 자동 판단이 불가능해 제외했다.
+    "시황(지수 5일선)"은 스캔 시작 전 전체 시장 기준 1회만 계산해 'MarketBullish'
+    컬럼으로 실어서 넘기며, require_market_bullish=True일 때만 조건에 반영한다.
+    "수급(외국인/기관 순매수)"은 이번 구현에서는 제외했다 (안정성 우선, pykrx 등
+    별도 의존성 필요 - 추후 필요하면 이 함수에 조건을 추가하면 된다).
+
+    데이터 부족 시 조용히 False 반환.
+    """
+    min_len = max(new_high_lookback, consolidation_period) + 5
+    if ohlcv_df is None or len(ohlcv_df) < min_len:
+        return False
+
+    df = ohlcv_df
+    today = df.iloc[-1]
+
+    # ---------- 신고가 + 이격거리 ----------
+    prior = df.iloc[-(new_high_lookback + 1):-1]
+    prior_high = prior['Close'].max()
+    if pd.isna(prior_high) or prior_high <= 0:
+        return False
+
+    is_new_high = bool(today['Close'] > prior_high)
+    if not is_new_high:
+        return False
+
+    gap_pct = (today['Close'] - prior_high) / prior_high * 100
+    narrow_gap = bool(gap_pct <= gap_tolerance_pct)
+
+    # ---------- 깔끔한 양봉 ----------
+    body_size = today['Close'] - today['Open']
+    upper_wick = today['High'] - max(today['Open'], today['Close'])
+    clean_candle = bool(body_size > 0 and upper_wick <= body_size * (upper_wick_max_pct / 100))
+
+    # ---------- 거래량 급증 ----------
+    avg20_volume = df['Volume'].iloc[-21:-1].mean()
+    volume_surge = bool(today['Volume'] >= avg20_volume * volume_surge_mult)
+
+    # ---------- 기간조정 (돌파 직전 consolidation_period일 레인지) ----------
+    consolidation_window = df.iloc[-(consolidation_period + 1):-1]
+    cons_high = consolidation_window['Close'].max()
+    cons_low = consolidation_window['Close'].min()
+    had_consolidation = False
+    if pd.notna(cons_high) and pd.notna(cons_low) and cons_low > 0:
+        cons_range_pct = (cons_high - cons_low) / cons_low * 100
+        had_consolidation = bool(cons_range_pct <= consolidation_range_max_pct)
+
+    # ---------- 시황 (지수, 있을 때만 체크) ----------
+    market_ok = True
+    if require_market_bullish and 'MarketBullish' in ohlcv_df.columns:
+        market_ok = bool(ohlcv_df['MarketBullish'].iloc[-1])
+
+    return bool(narrow_gap and clean_candle and volume_surge and had_consolidation and market_ok)
+
+
 CONFIRMATION_TECHNIQUES = [
     ("양봉+MA돌파+거래량", has_candle_ma_breakout_signal),
     ("MACD", has_macd_buy_signal),
     ("볼린저밴드+RSI", has_bollinger_rsi_buy_signal),
     ("정배열+장대양봉눌림목", has_pullback_after_breakout_signal),
-    ("더블볼린저밴드(WB)", has_double_bollinger_buy_signal),  # 신규 추가
+    ("더블볼린저밴드(WB)", has_double_bollinger_buy_signal),
+    ("역대급거래량+볼린저상단강돌파", has_extreme_volume_bb_breakout_signal),  # 매매기법1
+    ("주도주+거래대금상위", has_leading_stock_signal),                        # 매매기법2
+    ("신정재종가베팅", has_jsj_closing_bet_signal),                           # 매매기법3
 ]
 
 
-def check_stock(row, start_date, end_date):
+def check_stock(row, start_date, end_date, market_bullish=True):
     code = row['Code']
     name = row['Name']
     try:
@@ -322,7 +530,15 @@ def check_stock(row, start_date, end_date):
         if len(df) < 25:
             return None
 
-        ohlcv = df[['Open', 'High', 'Low', 'Close', 'Volume']]
+        ohlcv = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+
+        # ---- 기법1/2/3에서 필요한 부가 정보 주입 (전체 시장 기준 1회 계산된 값) ----
+        shares = row.get('Stocks', None)
+        if pd.notna(shares) and shares:
+            ohlcv['Shares'] = shares
+        ohlcv['IsLeading'] = bool(row.get('IsLeading', False))
+        ohlcv['MarketBullish'] = bool(market_bullish)
+
         today = df.iloc[-1]
         yesterday = df.iloc[-2]
 
@@ -353,19 +569,54 @@ def check_stock(row, start_date, end_date):
     return None
 
 
+def get_market_bullish_flag(end_date: str) -> bool:
+    """
+    [기법3용] 코스피 지수가 5일 이동평균선 위에 있는지(시황 상승/반등 여부)를
+    스캔 시작 전 딱 1번만 조회해서 판단한다. 조회 실패 시 안전하게 True(조건 미적용)로
+    처리해서 전체 스캔이 실패하지 않도록 한다.
+    """
+    try:
+        start = (datetime.strptime(end_date, '%Y-%m-%d') - timedelta(days=30)).strftime('%Y-%m-%d')
+        idx_df = fdr.DataReader('KS11', start=start, end=end_date)
+        idx_df['MA5'] = idx_df['Close'].rolling(window=5).mean()
+        last = idx_df.iloc[-1]
+        if pd.isna(last['MA5']):
+            return True
+        return bool(last['Close'] >= last['MA5'])
+    except Exception as e:
+        logging.warning(f"코스피 지수 조회 실패, 시황 조건 기본값(True)으로 진행: {e}")
+        return True
+
+
 def fast_find_eaten_candles(max_workers=20):
     logging.info("전 종목 목록을 불러오는 중...")
     stocks = fdr.StockListing('KRX')
-    stocks = stocks[stocks['Market'].isin(['KOSPI', 'KOSDAQ'])]
+    stocks = stocks[stocks['Market'].isin(['KOSPI', 'KOSDAQ'])].copy()
 
     end_date = datetime.today().strftime('%Y-%m-%d')
     start_date = (datetime.today() - timedelta(days=200)).strftime('%Y-%m-%d')
+
+    # ---- [기법2용] 거래대금(Amount) 상위 LEADING_STOCK_TOP_PCT 비율을 '주도주 후보군'으로 산정 ----
+    # fdr.StockListing('KRX')가 이미 당일 거래대금을 담고 있어 추가 네트워크 호출이 필요 없다.
+    if 'Amount' in stocks.columns:
+        threshold = stocks['Amount'].quantile(1 - LEADING_STOCK_TOP_PCT)
+        stocks['IsLeading'] = stocks['Amount'] >= threshold
+    else:
+        logging.warning("종목 목록에 'Amount'(거래대금) 컬럼이 없어 주도주 필터를 비활성화합니다.")
+        stocks['IsLeading'] = False
+
+    # ---- [기법3용] 코스피 시황(5일선) 1회 계산 ----
+    market_bullish = get_market_bullish_flag(end_date)
+    logging.info(f"코스피 시황(5일선 기준 상승 여부): {market_bullish}")
 
     results = []
     logging.info(f"총 {len(stocks)}개 종목을 {max_workers}개 스레드로 탐색합니다...")
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(check_stock, row, start_date, end_date) for _, row in stocks.iterrows()]
+        futures = [
+            executor.submit(check_stock, row, start_date, end_date, market_bullish)
+            for _, row in stocks.iterrows()
+        ]
         for future in as_completed(futures):
             res = future.result()
             if res:
