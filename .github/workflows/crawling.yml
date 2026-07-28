@@ -22,3 +22,8 @@ jobs:
 
       - name: Run crawling
         run: python crawling.py
+      - name: Save Excel
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-list
+          path: 상장법인목록.xlsx
