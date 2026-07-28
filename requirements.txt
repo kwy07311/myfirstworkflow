@@ -1,4 +1,4 @@
 pandas
-finance-datareader
+FinanceDataReader
 openpyxl
 pykrx
