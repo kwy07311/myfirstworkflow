@@ -1,20 +1,15 @@
 name: Stock Scanner
 
 on:
-  # GitHub Actions에서 Run workflow 버튼으로 실행
   workflow_dispatch:
-
-  # 평일 18:00(KST) 자동 실행
   schedule:
-    - cron: '0 9 * * 1-5'
+    - cron: '0 9 * * 1-5'  # 평일 18:00 KST (장마감 후)
 
 jobs:
-  scan:
+  accumulate:
     runs-on: ubuntu-latest
-
     permissions:
-      contents: read
-
+      contents: write   # csv를 다시 커밋하려면 write 권한 필요
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,11 +24,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run scanner
-        run: python scanner.py
+      - name: Run accumulator
+        run: python accumulate_daily.py
 
-      - name: Upload result
-        uses: actions/upload-artifact@v4
-        with:
-          name: stock-result
-          path: result.xlsx
+      - name: Commit updated history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/ohlcv_history.csv
+          git diff --cached --quiet || git commit -m "chore: update ohlcv history"
+          git push
