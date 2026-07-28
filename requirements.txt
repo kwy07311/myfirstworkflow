@@ -1,4 +1,4 @@
 pandas
-FinanceDataReader
+git+https://github.com/FinanceData/FinanceDataReader.git
 openpyxl
 pykrx
