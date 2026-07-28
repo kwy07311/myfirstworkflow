@@ -1,11 +1,10 @@
 import pandas as pd
 import os
 
-# 로컬에 다운로드한 CSV 파일 경로
-file_path = r"C:\Users\user\Desktop\파이썬\상장법인목록.csv"
+file_path = "상장법인목록.csv"
 
-# 인코딩은 cp949가 가장 안정적
 df = pd.read_csv(file_path, encoding='cp949')
+
 
 # 컬럼명 확인
 print(df.columns)
