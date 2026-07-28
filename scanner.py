@@ -1,39 +1,35 @@
-from pykrx import stock
-from datetime import datetime, timedelta
+import FinanceDataReader as fdr
 import pandas as pd
+from datetime import datetime, timedelta
 
-# 오늘 날짜
-today = datetime.today()
-start = (today - timedelta(days=60)).strftime("%Y%m%d")
-end = today.strftime("%Y%m%d")
+# 종목 목록
+stocks = fdr.StockListing("KRX")
+
+# 최근 30일 데이터 확보
+start = (datetime.today() - timedelta(days=30)).strftime("%Y-%m-%d")
 
 result = []
 
-tickers = stock.get_market_ticker_list(date=end)
+print(f"전체 종목 : {len(stocks)}")
 
-print(f"전체 종목 : {len(tickers)}개")
+for _, stock in stocks.iterrows():
 
-for ticker in tickers:
+    code = stock["Code"]
+    name = stock["Name"]
 
     try:
+        df = fdr.DataReader(code, start)
 
-        df = stock.get_market_ohlcv_by_date(
-            start,
-            end,
-            ticker
-        )
-
-        # 데이터 부족
-        if len(df) < 15:
+        if len(df) < 11:
             continue
 
-        # 컬럼 계산
-        df["range"] = df["고가"] - df["저가"]
+        # 전체 길이
+        df["range"] = df["High"] - df["Low"]
 
-        # 양봉 기준 윗꼬리
-        df["upper_shadow"] = df["고가"] - df["종가"]
+        # 윗꼬리
+        df["upper"] = df["High"] - df["Close"]
 
-        # 최근10일 최대 전체길이(오늘 제외)
+        # 최근 10거래일(오늘 제외)
         df["max10"] = (
             df["range"]
             .shift(1)
@@ -43,45 +39,35 @@ for ticker in tickers:
 
         last = df.iloc[-1]
 
-        # 오늘이 음봉이면 제외
-        if last["종가"] <= last["시가"]:
+        # 양봉
+        if last["Close"] <= last["Open"]:
             continue
 
-        # 전체길이 비교
+        # 최근10거래일보다 큰 캔들
         if last["range"] <= last["max10"]:
             continue
 
-        # 윗꼬리 비율
-        if last["upper_shadow"] / last["range"] >= 0.20:
+        # 윗꼬리 10%
+        if last["upper"] / last["range"] >= 0.10:
             continue
 
-        name = stock.get_market_ticker_name(ticker)
-
         result.append({
-            "종목코드": ticker,
+            "종목코드": code,
             "종목명": name,
-            "시가": last["시가"],
-            "고가": last["고가"],
-            "저가": last["저가"],
-            "종가": last["종가"],
+            "시가": last["Open"],
+            "고가": last["High"],
+            "저가": last["Low"],
+            "종가": last["Close"],
             "전체길이": last["range"],
-            "윗꼬리": last["upper_shadow"]
+            "윗꼬리": last["upper"],
+            "윗꼬리비율": round(last["upper"] / last["range"], 3)
         })
 
         print(name)
 
-    except Exception as e:
-        print(ticker, e)
+    except Exception:
+        continue
 
-# 결과 저장
-result_df = pd.DataFrame(result)
+pd.DataFrame(result).to_excel("result.xlsx", index=False)
 
-result_df.to_excel(
-    "result.xlsx",
-    index=False
-)
-
-print()
-print("="*40)
-print(f"검색 완료 : {len(result_df)}종목")
-print("="*40)
+print(f"\n검색 완료 : {len(result)}개")
