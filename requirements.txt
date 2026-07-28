@@ -1,3 +1,5 @@
+pykrx
 pandas
 finance-datareader
 openpyxl
+requests
