@@ -52,7 +52,7 @@ for ticker in tickers:
             continue
 
         # 윗꼬리 비율
-        if last["upper_shadow"] / last["range"] >= 0.10:
+        if last["upper_shadow"] / last["range"] >= 0.20:
             continue
 
         name = stock.get_market_ticker_name(ticker)
