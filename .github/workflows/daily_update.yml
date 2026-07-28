@@ -1,12 +1,9 @@
 name: KIS Daily Stock Range Update
 
-# 수동 실행 + 평일 자동 실행
 on:
   workflow_dispatch:
 
   schedule:
-    # 한국시간 15:50 기준
-    # GitHub Actions cron은 UTC 기준이라 06:50 UTC = 한국 15:50
     - cron: "50 6 * * 1-5"
 
 
@@ -16,28 +13,23 @@ jobs:
 
     runs-on: ubuntu-latest
 
-
     steps:
 
-      # 소스 가져오기
       - name: Checkout repository
         uses: actions/checkout@v4
 
 
-      # Python 설치
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
 
-      # 라이브러리 설치
       - name: Install packages
         run: |
           pip install pandas requests openpyxl
 
 
-      # 데일리 업데이트 실행
       - name: Run daily update
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
@@ -45,3 +37,13 @@ jobs:
 
         run: |
           python daily_update/main.py
+
+
+      - name: Commit updated data
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+          git add .
+          git commit -m "Daily stock range update" || echo "No changes"
+          git push
