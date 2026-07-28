@@ -1,20 +1,12 @@
 import pandas as pd
-import os
-
-file_path = "상장법인목록.csv"
-
-df = pd.read_csv(file_path, encoding='cp949')
+import FinanceDataReader as fdr
 
 
-# 컬럼명 확인
-print(df.columns)
+# 현재 상장 종목 목록 가져오기
+stocks = fdr.StockListing('KRX')
 
-# 종목코드 6자리 맞추기
-df['종목코드'] = df['종목코드'].apply(lambda x: str(x).zfill(6))
 
-# 실행 파일 경로에 저장
-current_path = os.path.dirname(os.path.abspath(__file__))
-save_path = os.path.join(current_path, "kospi_kosdaq.xlsx")
-df.to_excel(save_path, index=False)
+# 엑셀 저장
+stocks.to_excel('상장법인목록.xlsx', index=False)
 
-print("✅ 엑셀 저장 완료:", save_path)
+print("상장 종목 목록 저장 완료")
