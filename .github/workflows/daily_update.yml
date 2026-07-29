@@ -36,7 +36,8 @@ jobs:
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
 
         run: |
-          python daily_update/main.py
+          cd daily_update
+          python main.py
 
 
       - name: Commit updated data
