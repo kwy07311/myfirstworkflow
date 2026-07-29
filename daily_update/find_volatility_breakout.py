@@ -1,28 +1,36 @@
-import pandas as pd
+# find_volatility_breakout.py
+
 import os
+import json
+import time
+import requests
+import pandas as pd
 
 
-# ==================================
-# 파일 경로
-# ==================================
+# ==============================
+# 환경 설정
+# ==============================
 
-# 과거 변동폭 누적 데이터 (읽기 전용)
+APP_KEY = os.getenv("KIS_APP_KEY")
+APP_SECRET = os.getenv("KIS_APP_SECRET")
+
+
+REAL_URL = "https://openapi.koreainvestment.com:9443"
+
+
 HISTORY_FILE = "input/mydata.xlsx"
 
-# 기존 종가수집 코드가 생성한 오늘 데이터
-TODAY_FILE = "input/today_stock_data.xlsx"
-
-# 결과 저장
 OUTPUT_DIR = "output"
+
 OUTPUT_FILE = os.path.join(
     OUTPUT_DIR,
     "volatility_breakout_result.xlsx"
 )
 
 
-# ==================================
+# ==============================
 # 결과 폴더 생성
-# ==================================
+# ==============================
 
 os.makedirs(
     OUTPUT_DIR,
@@ -30,144 +38,277 @@ os.makedirs(
 )
 
 
-# ==================================
-# 엑셀 읽기
-# ==================================
+# ==============================
+# KIS Access Token 발급
+# ==============================
 
-history = pd.read_excel(
-    HISTORY_FILE
-)
+def get_access_token():
 
-today = pd.read_excel(
-    TODAY_FILE
-)
+    url = f"{REAL_URL}/oauth2/tokenP"
 
+    body = {
+        "grant_type": "client_credentials",
+        "appkey": APP_KEY,
+        "appsecret": APP_SECRET
+    }
 
-# ==================================
-# 과거 변동폭 최대값 계산
-# name 제외 모든 컬럼 = 날짜
-# ==================================
-
-date_columns = [
-    col for col in history.columns
-    if col != "name"
-]
-
-
-history["max_history_range"] = (
-    history[date_columns]
-    .max(axis=1)
-)
-
-
-# 필요한 데이터만 사용
-history_ref = history[
-    [
-        "name",
-        "max_history_range"
-    ]
-]
-
-
-# ==================================
-# 오늘 데이터와 연결
-# ==================================
-
-df = today.merge(
-    history_ref,
-    on="name",
-    how="inner"
-)
-
-
-# ==================================
-# 오늘 변동폭 계산
-# ==================================
-
-df["today_range"] = (
-    df["high"]
-    -
-    df["low"]
-)
-
-
-# ==================================
-# 양봉 여부
-# 현재가 > 시가
-# ==================================
-
-df["bullish"] = (
-    df["current_price"]
-    >
-    df["open"]
-)
-
-
-# ==================================
-# 위꼬리 비율 계산
-# ==================================
-
-df["upper_shadow_ratio"] = 0
-
-
-valid = (
-    df["today_range"] > 0
-)
-
-
-df.loc[valid, "upper_shadow_ratio"] = (
-    (
-        df.loc[valid, "high"]
-        -
-        df.loc[valid, "current_price"]
+    res = requests.post(
+        url,
+        json=body
     )
-    /
-    df.loc[valid, "today_range"]
-)
+
+    res.raise_for_status()
+
+    return res.json()["access_token"]
 
 
-# ==================================
-# 조건 검색
-#
-# 1. 오늘 변동폭 > 과거 최대 변동폭
-# 2. 양봉
-# 3. 위꼬리 10% 미만
-# ==================================
 
-result = df[
-    (df["today_range"] > df["max_history_range"])
-    &
-    (df["bullish"])
-    &
-    (df["upper_shadow_ratio"] < 0.1)
-]
+# ==============================
+# 현재가 조회
+# ==============================
+
+def get_stock_price(
+    token,
+    stock_code
+):
+
+    url = (
+        f"{REAL_URL}/uapi/domestic-stock/v1/"
+        "quotations/inquire-price"
+    )
 
 
-# ==================================
-# 결과 저장
-# ==================================
+    headers = {
 
-result = result[
-    [
-        "name",
-        "today_range",
-        "max_history_range",
-        "current_price",
-        "upper_shadow_ratio"
+        "authorization":
+            f"Bearer {token}",
+
+        "appkey":
+            APP_KEY,
+
+        "appsecret":
+            APP_SECRET,
+
+        "tr_id":
+            "FHKST01010100"
+
+    }
+
+
+    params = {
+
+        "FID_COND_MRKT_DIV_CODE":
+            "J",
+
+        "FID_INPUT_ISCD":
+            stock_code
+
+    }
+
+
+    res = requests.get(
+        url,
+        headers=headers,
+        params=params
+    )
+
+
+    data = res.json()
+
+
+    output = data["output"]
+
+
+    return {
+
+        "open":
+            float(output["stck_oprc"]),
+
+        "high":
+            float(output["stck_hgpr"]),
+
+        "low":
+            float(output["stck_lwpr"]),
+
+        "current_price":
+            float(output["stck_prpr"])
+
+    }
+
+
+
+# ==============================
+# 종목코드 추출
+# 삼성전자_005930
+# ==============================
+
+def extract_code(name):
+
+    return str(name).split("_")[-1]
+
+
+
+# ==============================
+# 메인
+# ==============================
+
+
+def main():
+
+
+    print("변동폭 돌파 검색 시작")
+
+
+    # --------------------------
+    # 과거 데이터 읽기
+    # --------------------------
+
+    history = pd.read_excel(
+        HISTORY_FILE
+    )
+
+
+    date_columns = [
+        c for c in history.columns
+        if c != "name"
     ]
-]
 
 
-result.to_excel(
-    OUTPUT_FILE,
-    index=False
-)
+    history["max_history_range"] = (
+        history[date_columns]
+        .max(axis=1)
+    )
 
 
-print(
-    f"변동폭 돌파 검색 완료 : {len(result)}개"
-)
+    token = get_access_token()
 
-print(
-    f"결과 파일 : {OUTPUT_FILE}"
-)
+
+    result_list = []
+
+
+    # --------------------------
+    # 종목별 현재 데이터 조회
+    # --------------------------
+
+    for _, row in history.iterrows():
+
+
+        name = row["name"]
+
+        code = extract_code(name)
+
+
+        try:
+
+            price = get_stock_price(
+                token,
+                code
+            )
+
+
+            today_range = (
+                price["high"]
+                -
+                price["low"]
+            )
+
+
+            if today_range <= 0:
+                continue
+
+
+            upper_shadow_ratio = (
+                price["high"]
+                -
+                price["current_price"]
+            ) / today_range
+
+
+            bullish = (
+                price["current_price"]
+                >
+                price["open"]
+            )
+
+
+            max_history = (
+                row["max_history_range"]
+            )
+
+
+            # 조건
+
+            if (
+                today_range > max_history
+                and bullish
+                and upper_shadow_ratio < 0.1
+            ):
+
+                result_list.append({
+
+                    "name":
+                        name,
+
+                    "code":
+                        code,
+
+                    "today_range":
+                        today_range,
+
+                    "max_history_range":
+                        max_history,
+
+                    "current_price":
+                        price["current_price"],
+
+                    "upper_shadow_ratio":
+                        upper_shadow_ratio
+
+                })
+
+
+        except Exception as e:
+
+            print(
+                name,
+                "조회 오류:",
+                e
+            )
+
+
+        # API 호출 제한 고려
+
+        time.sleep(0.1)
+
+
+
+    # --------------------------
+    # 결과 저장
+    # --------------------------
+
+    result = pd.DataFrame(
+        result_list
+    )
+
+
+    result.to_excel(
+        OUTPUT_FILE,
+        index=False
+    )
+
+
+    print(
+        "완료:",
+        len(result),
+        "개 종목"
+    )
+
+    print(
+        OUTPUT_FILE
+    )
+
+
+
+if __name__ == "__main__":
+
+    main()
