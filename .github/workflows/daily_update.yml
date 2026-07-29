@@ -30,6 +30,13 @@ jobs:
           pip install pandas requests openpyxl
 
 
+      - name: Check files
+        run: |
+          cd daily_update
+          pwd
+          ls -la
+
+          
       - name: Run daily update
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
@@ -48,9 +55,3 @@ jobs:
           git add .
           git commit -m "Daily stock range update" || echo "No changes"
           git push
-
-      - name: Check files
-        run: |
-          cd daily_update
-          pwd
-          ls -la
