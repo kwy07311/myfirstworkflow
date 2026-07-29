@@ -1,6 +1,7 @@
 import pandas as pd
 import time
-import os
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from kis_token import get_access_token
 from today_range import get_today_range
@@ -10,25 +11,83 @@ from logger import log
 import config
 
 
+STOCK_FILE = "input/mydata.xlsx"
 
-STOCK_FILE="input/mydata.xlsx"
-
-
-
-token=get_access_token()
+# 동시에 실행할 API 요청 수
+MAX_WORKERS = 5
 
 
-stocks=pd.read_excel(
+token = get_access_token()
+
+
+stocks = pd.read_excel(
     STOCK_FILE
 )
 
 
+def extract_code(name):
 
-result=[]
+    match = re.search(
+        r"\d{6}",
+        str(name)
+    )
+
+    if match:
+        return match.group()
+
+    return None
 
 
-success=0
-fail=0
+
+def request_stock(row):
+
+    name = row["name"]
+
+    code = extract_code(name)
+
+
+    if code is None:
+
+        return {
+            "name": name,
+            "date": None,
+            "value": None,
+            "error": "code error"
+        }
+
+
+    try:
+
+        date, value = get_today_range(
+            token,
+            code
+        )
+
+
+        return {
+            "name": name,
+            "date": date,
+            "value": value,
+            "error": None
+        }
+
+
+    except Exception as e:
+
+        return {
+            "name": name,
+            "date": None,
+            "value": None,
+            "error": str(e)
+        }
+
+
+
+
+result = []
+
+success = 0
+fail = 0
 
 
 
@@ -38,66 +97,70 @@ log(
 
 
 
-for idx,row in stocks.iterrows():
+with ThreadPoolExecutor(
+    max_workers=MAX_WORKERS
+) as executor:
 
 
-    name=row["name"]
+    futures = []
 
 
-    code=name.split("_")[-1]
+    for _, row in stocks.iterrows():
 
-
-
-    date,value=get_today_range(
-        token,
-        code
-    )
-
-
-    if value is not None:
-
-
-        result.append(
-            {
-                "name":name,
-                date[2:]:value
-            }
-        )
-
-
-        success+=1
-
-
-    else:
-
-        fail+=1
-
-        log(
-            f"실패 : {name}"
+        futures.append(
+            executor.submit(
+                request_stock,
+                row
+            )
         )
 
 
 
-    if idx % 100 ==0:
-
-        log(
-            f"{idx}/{len(stocks)} 완료"
-        )
-
-
-    time.sleep(
-        config.REQUEST_DELAY
-    )
+    for idx, future in enumerate(
+        as_completed(futures),
+        1
+    ):
 
 
+        data = future.result()
 
-# 최종 저장
+
+        if data["value"] is not None:
+
+
+            result.append(
+                {
+                    "name": data["name"],
+                    data["date"][2:]: data["value"]
+                }
+            )
+
+            success += 1
+
+
+        else:
+
+            fail += 1
+
+            log(
+                f"실패 : {data['name']} / {data['error']}"
+            )
+
+
+        if idx % 100 == 0:
+
+            log(
+                f"{idx}/{len(stocks)} 완료"
+            )
+
+
 
 if result:
 
     update_excel(
         result
     )
+
 
 
 log(
