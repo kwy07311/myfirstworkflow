@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
 
   schedule:
+    # 한국시간 15:50 (UTC 06:50)
     - cron: "50 6 * * 1-5"
+
+permissions:
+  contents: write
 
 jobs:
 
@@ -33,6 +37,7 @@ jobs:
           cd daily_update
           pwd
           ls -la
+          ls -la input
 
       - name: Run daily update
         run: |
@@ -45,5 +50,10 @@ jobs:
           git config --global user.email "github-actions@github.com"
 
           git add .
-          git commit -m "Daily stock range update" || echo "No changes"
-          git push
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Daily stock range update"
+            git push
+          fi
