@@ -1,0 +1,87 @@
+name: Volatility Breakout Scan
+
+
+on:
+
+  workflow_dispatch:
+
+
+  schedule:
+    # 한국시간 평일 15:00 실행
+    # UTC 06:00
+    - cron: "0 6 * * 1-5"
+
+
+
+permissions:
+  contents: read
+
+
+
+jobs:
+
+
+  breakout-scan:
+
+
+    runs-on: ubuntu-latest
+
+
+
+    steps:
+
+
+      # 저장소 가져오기
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+
+      # Python 설치
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+
+
+      # 라이브러리 설치
+
+      - name: Install packages
+        run: |
+          pip install pandas openpyxl requests
+
+
+
+      # 변동폭 돌파 검색 실행
+
+      - name: Run volatility breakout scan
+
+        env:
+
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+
+
+        run: |
+
+          cd daily_update
+
+          python find_volatility_breakout.py
+
+
+
+      # 결과 파일 보관
+
+      - name: Upload result
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: volatility-breakout-result
+
+          path: daily_update/output/volatility_breakout_result.xlsx
