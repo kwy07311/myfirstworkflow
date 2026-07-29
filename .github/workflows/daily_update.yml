@@ -92,3 +92,6 @@ jobs:
             git push
 
           fi
+
+      - name: Find volatility breakout
+        run: python find_volatility_breakout.py
