@@ -5,8 +5,7 @@ on:
 
   schedule:
     # 한국시간 평일 15:50 실행
-    # GitHub Actions는 UTC 기준
-    # 06:50 UTC = 한국시간 15:50
+    # UTC 기준 06:50
     - cron: "50 6 * * 1-5"
 
 
@@ -24,7 +23,6 @@ jobs:
     steps:
 
 
-      # 저장소 가져오기
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
@@ -32,7 +30,6 @@ jobs:
 
 
 
-      # Python 설치
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -40,14 +37,12 @@ jobs:
 
 
 
-      # 라이브러리 설치
       - name: Install packages
         run: |
           pip install pandas openpyxl pykrx
 
 
 
-      # 파일 확인
       - name: Check files
         run: |
           cd daily_update
@@ -57,7 +52,6 @@ jobs:
 
 
 
-      # 주가 데이터 업데이트 실행
       - name: Run daily update
         env:
           KRX_ID: ${{ secrets.KRX_ID }}
@@ -69,7 +63,6 @@ jobs:
 
 
 
-      # 변경된 엑셀 GitHub 반영
       - name: Commit updated data
         run: |
 
@@ -92,6 +85,3 @@ jobs:
             git push
 
           fi
-
-      - name: Find volatility breakout
-        run: python find_volatility_breakout.py
