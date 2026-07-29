@@ -1,46 +1,38 @@
 # find_volatility_breakout.py
 
 import os
-import json
 import time
 import requests
 import pandas as pd
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ==============================
+
+# ==================================
 # 환경 설정
-# ==============================
+# ==================================
 
 APP_KEY = os.getenv("KIS_APP_KEY")
 APP_SECRET = os.getenv("KIS_APP_SECRET")
-
 
 REAL_URL = "https://openapi.koreainvestment.com:9443"
 
 
 HISTORY_FILE = "input/mydata.xlsx"
 
-OUTPUT_DIR = "output"
-
-OUTPUT_FILE = os.path.join(
-    OUTPUT_DIR,
-    "volatility_breakout_result.xlsx"
+OUTPUT_FILE = (
+    "output/volatility_breakout_result.xlsx"
 )
 
 
-# ==============================
-# 결과 폴더 생성
-# ==============================
-
-os.makedirs(
-    OUTPUT_DIR,
-    exist_ok=True
-)
+# 동시에 조회할 개수
+MAX_WORKERS = 10
 
 
-# ==============================
-# KIS Access Token 발급
-# ==============================
+
+# ==================================
+# 토큰 발급
+# ==================================
 
 def get_access_token():
 
@@ -52,25 +44,38 @@ def get_access_token():
         "appsecret": APP_SECRET
     }
 
-    res = requests.post(
+
+    response = requests.post(
         url,
-        json=body
+        json=body,
+        timeout=10
     )
 
-    res.raise_for_status()
+    response.raise_for_status()
 
-    return res.json()["access_token"]
+    return response.json()["access_token"]
 
 
 
-# ==============================
+# ==================================
+# 종목코드 추출
+# 삼성전자_005930
+# ==================================
+
+def extract_code(name):
+
+    return str(name).split("_")[-1]
+
+
+
+# ==================================
 # 현재가 조회
-# ==============================
+# ==================================
 
-def get_stock_price(
-    token,
-    stock_code
-):
+def get_stock_price(token, name):
+
+    code = extract_code(name)
+
 
     url = (
         f"{REAL_URL}/uapi/domestic-stock/v1/"
@@ -91,7 +96,6 @@ def get_stock_price(
 
         "tr_id":
             "FHKST01010100"
-
     }
 
 
@@ -101,67 +105,91 @@ def get_stock_price(
             "J",
 
         "FID_INPUT_ISCD":
-            stock_code
+            code
 
     }
 
 
-    res = requests.get(
-        url,
-        headers=headers,
-        params=params
-    )
+    for retry in range(3):
+
+        try:
+
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=10
+            )
 
 
-    data = res.json()
+            data = response.json()
 
 
-    output = data["output"]
+            output = data["output"]
 
 
-    return {
+            return {
 
-        "open":
-            float(output["stck_oprc"]),
+                "name":
+                    name,
 
-        "high":
-            float(output["stck_hgpr"]),
+                "code":
+                    code,
 
-        "low":
-            float(output["stck_lwpr"]),
+                "open":
+                    float(output["stck_oprc"]),
 
-        "current_price":
-            float(output["stck_prpr"])
+                "high":
+                    float(output["stck_hgpr"]),
 
-    }
+                "low":
+                    float(output["stck_lwpr"]),
 
+                "current_price":
+                    float(output["stck_prpr"])
 
-
-# ==============================
-# 종목코드 추출
-# 삼성전자_005930
-# ==============================
-
-def extract_code(name):
-
-    return str(name).split("_")[-1]
+            }
 
 
+        except Exception as e:
 
-# ==============================
+            if retry < 2:
+
+                time.sleep(1)
+
+            else:
+
+                return {
+
+                    "name":
+                        name,
+
+                    "error":
+                        str(e)
+
+                }
+
+
+
+
+# ==================================
 # 메인
-# ==============================
-
+# ==================================
 
 def main():
 
+    start_time = time.time()
 
+
+    print("=" * 40)
     print("변동폭 돌파 검색 시작")
+    print("=" * 40)
 
 
-    # --------------------------
-    # 과거 데이터 읽기
-    # --------------------------
+
+    # -------------------------------
+    # 과거 데이터
+    # -------------------------------
 
     history = pd.read_excel(
         HISTORY_FILE
@@ -180,114 +208,171 @@ def main():
     )
 
 
+
     token = get_access_token()
 
 
-    result_list = []
+
+    stock_names = (
+        history["name"]
+        .tolist()
+    )
 
 
-    # --------------------------
-    # 종목별 현재 데이터 조회
-    # --------------------------
-
-    for _, row in history.iterrows():
+    total = len(stock_names)
 
 
-        name = row["name"]
+    print(
+        f"총 {total}개 종목 조회 예정"
+    )
 
-        code = extract_code(name)
 
 
-        try:
+    # -------------------------------
+    # 병렬 조회
+    # -------------------------------
 
-            price = get_stock_price(
+    results = []
+
+    success = 0
+
+    fail = 0
+
+
+
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+
+        futures = {
+
+            executor.submit(
+                get_stock_price,
                 token,
-                code
-            )
-
-
-            today_range = (
-                price["high"]
-                -
-                price["low"]
-            )
-
-
-            if today_range <= 0:
-                continue
-
-
-            upper_shadow_ratio = (
-                price["high"]
-                -
-                price["current_price"]
-            ) / today_range
-
-
-            bullish = (
-                price["current_price"]
-                >
-                price["open"]
-            )
-
-
-            max_history = (
-                row["max_history_range"]
-            )
-
-
-            # 조건
-
-            if (
-                today_range > max_history
-                and bullish
-                and upper_shadow_ratio < 0.1
+                name
             ):
+            name
 
-                result_list.append({
+            for name in stock_names
 
-                    "name":
-                        name,
-
-                    "code":
-                        code,
-
-                    "today_range":
-                        today_range,
-
-                    "max_history_range":
-                        max_history,
-
-                    "current_price":
-                        price["current_price"],
-
-                    "upper_shadow_ratio":
-                        upper_shadow_ratio
-
-                })
-
-
-        except Exception as e:
-
-            print(
-                name,
-                "조회 오류:",
-                e
-            )
-
-
-        # API 호출 제한 고려
-
-        time.sleep(0.1)
+        }
 
 
 
-    # --------------------------
-    # 결과 저장
-    # --------------------------
+        for idx, future in enumerate(
+            as_completed(futures),
+            start=1
+        ):
 
-    result = pd.DataFrame(
-        result_list
+
+            data = future.result()
+
+
+            if "error" in data:
+
+                fail += 1
+
+            else:
+
+                success += 1
+
+                results.append(data)
+
+
+
+            if idx % 100 == 0 or idx == total:
+
+                print(
+                    f"[{idx}/{total}] "
+                    f"조회 완료 "
+                    f"(성공:{success}, 실패:{fail})"
+                )
+
+
+
+    # -------------------------------
+    # 비교
+    # -------------------------------
+
+
+    today = pd.DataFrame(
+        results
+    )
+
+
+    merged = today.merge(
+        history[
+            [
+                "name",
+                "max_history_range"
+            ]
+        ],
+        on="name",
+        how="inner"
+    )
+
+
+
+    merged["today_range"] = (
+        merged["high"]
+        -
+        merged["low"]
+    )
+
+
+    merged["upper_shadow_ratio"] = (
+
+        (
+            merged["high"]
+            -
+            merged["current_price"]
+        )
+        /
+        merged["today_range"]
+
+    )
+
+
+
+    merged["bullish"] = (
+
+        merged["current_price"]
+        >
+        merged["open"]
+
+    )
+
+
+
+    result = merged[
+
+        (merged["today_range"]
+         >
+         merged["max_history_range"])
+
+        &
+
+        (merged["bullish"])
+
+        &
+
+        (merged["upper_shadow_ratio"]
+         <
+         0.1)
+
+    ]
+
+
+
+    # -------------------------------
+    # 저장
+    # -------------------------------
+
+
+    os.makedirs(
+        "output",
+        exist_ok=True
     )
 
 
@@ -297,15 +382,48 @@ def main():
     )
 
 
+
+    elapsed = (
+        time.time()
+        -
+        start_time
+    )
+
+
+
+    print("=" * 40)
+
     print(
-        "완료:",
-        len(result),
-        "개 종목"
+        f"조회 성공 : {success}"
     )
 
     print(
-        OUTPUT_FILE
+        f"조회 실패 : {fail}"
     )
+
+    print(
+        f"돌파 종목 : {len(result)}"
+    )
+
+
+    if len(result) > 0:
+
+        print("")
+
+        for name in result["name"]:
+
+            print(
+                "★",
+                name
+            )
+
+
+    print(
+        f"실행 시간 : {elapsed:.1f}초"
+    )
+
+
+    print("=" * 40)
 
 
 
