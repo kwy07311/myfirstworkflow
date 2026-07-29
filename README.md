@@ -1,2 +1,0 @@
-# myfirstworkflow
-stock extract
