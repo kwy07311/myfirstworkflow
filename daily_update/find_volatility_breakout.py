@@ -25,10 +25,10 @@ REAL_URL = "https://openapi.koreainvestment.com:9443"
 HISTORY_FILE = "input/mydata.xlsx"
 
 
-MAX_WORKERS = 15
+MAX_WORKERS = 10
 
-# 초당 허용 호출 수 (KIS 실전 제한 대비 여유값)
-RATE_LIMIT_PER_SEC = 15
+# 초당 허용 호출 수 (실패율 보고 재조정 예정)
+RATE_LIMIT_PER_SEC = 8
 
 
 # ==================================
@@ -301,7 +301,9 @@ def get_stock_price(token, name):
 
             if retry < 2:
 
-                time.sleep(0.3)
+                # 재시도 간격을 점점 늘려서(0.5초, 1초) 같은 혼잡 구간에
+                # 바로 재요청하지 않도록 함
+                time.sleep(0.5 * (retry + 1))
 
 
             else:
@@ -413,6 +415,8 @@ def main():
 
     results = []
 
+    errors = []
+
     success = 0
 
     fail = 0
@@ -468,6 +472,8 @@ def main():
 
 
                 fail += 1
+
+                errors.append(data["error"])
 
 
             else:
@@ -702,6 +708,38 @@ def main():
         f"조회 실패 : {fail}"
 
     )
+
+
+    if errors:
+
+
+        error_counts = {}
+
+
+        for err in errors:
+
+            key = str(err)[:80]
+
+            error_counts[key] = (
+                error_counts.get(key, 0) + 1
+            )
+
+
+        print("-- 실패 유형 상위 5개 --")
+
+
+        for key, count in sorted(
+
+            error_counts.items(),
+
+            key=lambda x: x[1],
+
+            reverse=True
+
+        )[:5]:
+
+
+            print(f"  [{count}건] {key}")
 
     print(
 
