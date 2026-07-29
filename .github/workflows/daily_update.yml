@@ -48,3 +48,9 @@ jobs:
           git add .
           git commit -m "Daily stock range update" || echo "No changes"
           git push
+
+      - name: Check files
+        run: |
+          cd daily_update
+          pwd
+          ls -la
