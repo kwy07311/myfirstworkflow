@@ -5,7 +5,6 @@ import requests
 import pandas as pd
 
 from requests.adapters import HTTPAdapter
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ==================================
@@ -25,10 +24,11 @@ REAL_URL = "https://openapi.koreainvestment.com:9443"
 HISTORY_FILE = "input/mydata.xlsx"
 
 
-MAX_WORKERS = 3
+# 순차 처리이므로 커넥션 풀은 1개면 충분
+MAX_WORKERS = 1
 
-# 초당 허용 호출 수 (KIS 실전 제한 20건 대비 여유값)
-RATE_LIMIT_PER_SEC = 15
+# 초당 허용 호출 수 (EGW00201 재발 방지를 위해 보수적으로 설정)
+RATE_LIMIT_PER_SEC = 10
 
 # 관심종목(멀티종목) 시세조회 API는 1회 호출에 최대 30종목까지 지원
 BATCH_SIZE = 30
@@ -490,7 +490,9 @@ def main():
 
 
     # -------------------------------
-    # 배치 병렬 조회 (배치당 최대 30종목)
+    # 배치 순차 조회 (배치당 최대 30종목)
+    # 동시 요청이 겹치면 KIS 서버가 "초당 거래건수 초과"로 판단하는
+    # 문제가 있어, 병렬 대신 순차 + RateLimiter 조합으로 처리
     # -------------------------------
 
 
@@ -504,81 +506,49 @@ def main():
 
 
 
-    with ThreadPoolExecutor(
-
-        max_workers=MAX_WORKERS
-
-    ) as executor:
+    for idx, batch in enumerate(batches, start=1):
 
 
+        batch_results = get_stock_price_batch(
 
-        futures = {
-
-
-            executor.submit(
-
-                get_stock_price_batch,
-
-                token,
-
-                batch
-
-            ):
+            token,
 
             batch
 
-
-            for batch in batches
-
-        }
+        )
 
 
 
-
-        for idx, future in enumerate(
-
-            as_completed(futures),
-
-            start=1
-
-        ):
+        for data in batch_results:
 
 
-
-            batch_results = future.result()
-
+            if "error" in data:
 
 
-            for data in batch_results:
+                fail += 1
+
+                errors.append(data["error"])
 
 
-                if "error" in data:
+            else:
 
 
-                    fail += 1
+                success += 1
 
-                    errors.append(data["error"])
-
-
-                else:
-
-
-                    success += 1
-
-                    results.append(data)
+                results.append(data)
 
 
 
 
-            print(
+        print(
 
-                f"[배치 {idx}/{total_batches}] "
+            f"[배치 {idx}/{total_batches}] "
 
-                f"조회 완료 "
+            f"조회 완료 "
 
-                f"(누적 성공:{success}, 실패:{fail})"
+            f"(누적 성공:{success}, 실패:{fail})"
 
-            )
+        )
 
 
 
