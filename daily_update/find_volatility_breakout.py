@@ -25,7 +25,7 @@ REAL_URL = "https://openapi.koreainvestment.com:9443"
 HISTORY_FILE = "input/mydata.xlsx"
 
 
-MAX_WORKERS = 5
+MAX_WORKERS = 3
 
 # 초당 허용 호출 수 (KIS 실전 제한 20건 대비 여유값)
 RATE_LIMIT_PER_SEC = 15
@@ -280,6 +280,19 @@ def get_stock_price_batch(token, name_batch):
 
 
             data = response.json()
+
+
+            if "output" not in data:
+
+                # KIS가 에러를 반환한 경우, 실제 사유(rt_cd/msg_cd/msg1)를 그대로 노출
+                raise RuntimeError(
+
+                    f"HTTP {response.status_code} / "
+                    f"rt_cd={data.get('rt_cd')} "
+                    f"msg_cd={data.get('msg_cd')} "
+                    f"msg1={data.get('msg1')}"
+
+                )
 
 
             outputs = data["output"]
