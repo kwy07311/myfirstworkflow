@@ -59,7 +59,7 @@ jobs:
 
         run: |
           cd daily_update
-          python main.py
+          python daily_add_price.py
 
 
 
