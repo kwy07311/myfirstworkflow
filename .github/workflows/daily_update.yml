@@ -6,7 +6,6 @@ on:
   schedule:
     - cron: "50 6 * * 1-5"
 
-
 jobs:
 
   daily-update:
@@ -17,18 +16,17 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-
       - name: Install packages
         run: |
-          pip install pandas requests openpyxl
-
+          pip install pandas openpyxl pykrx
 
       - name: Check files
         run: |
@@ -36,16 +34,10 @@ jobs:
           pwd
           ls -la
 
-          
       - name: Run daily update
-        env:
-          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
-          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
-
         run: |
           cd daily_update
           python main.py
-
 
       - name: Commit updated data
         run: |
