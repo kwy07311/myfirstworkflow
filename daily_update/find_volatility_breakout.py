@@ -25,10 +25,13 @@ REAL_URL = "https://openapi.koreainvestment.com:9443"
 HISTORY_FILE = "input/mydata.xlsx"
 
 
-MAX_WORKERS = 10
+MAX_WORKERS = 5
 
-# 초당 허용 호출 수 (실패율 보고 재조정 예정)
-RATE_LIMIT_PER_SEC = 8
+# 초당 허용 호출 수 (KIS 실전 제한 20건 대비 여유값)
+RATE_LIMIT_PER_SEC = 15
+
+# 관심종목(멀티종목) 시세조회 API는 1회 호출에 최대 30종목까지 지원
+BATCH_SIZE = 30
 
 
 # ==================================
@@ -170,13 +173,37 @@ def extract_code(name):
 
 
 # ==================================
-# 현재가 조회
+# 종목 리스트를 BATCH_SIZE 단위로 분할
 # ==================================
 
-def get_stock_price(token, name):
+def chunk_list(items, size):
+
+    for i in range(0, len(items), size):
+
+        yield items[i:i + size]
 
 
-    code = extract_code(name)
+
+
+# ==================================
+# 현재가 조회 (관심종목 멀티종목 시세조회 - 최대 30종목/1회)
+# ==================================
+
+def get_stock_price_batch(token, name_batch):
+
+    """
+    name_batch: 원본 name(예: '삼성전자_005930') 리스트, 최대 30개
+    반환: [{'name':.., 'code':.., 'open':.., 'high':.., 'low':.., 'current_price':..}, ...]
+    """
+
+
+    code_to_name = {
+
+        extract_code(name): name
+
+        for name in name_batch
+
+    }
 
 
 
@@ -184,7 +211,7 @@ def get_stock_price(token, name):
 
         f"{REAL_URL}/uapi/domestic-stock/v1/"
 
-        "quotations/inquire-price"
+        "quotations/intstock-multprice"
 
     )
 
@@ -210,25 +237,24 @@ def get_stock_price(token, name):
 
         "tr_id":
 
-            "FHKST01010100"
+            "FHKST11300006"
 
     }
 
 
 
-    params = {
+    params = {}
 
 
-        "FID_COND_MRKT_DIV_CODE":
-
-            "J",
+    for idx, name in enumerate(name_batch, start=1):
 
 
-        "FID_INPUT_ISCD":
+        code = extract_code(name)
 
-            code
 
-    }
+        params[f"FID_COND_MRKT_DIV_CODE_{idx}"] = "J"
+
+        params[f"FID_INPUT_ISCD_{idx}"] = code
 
 
 
@@ -256,43 +282,65 @@ def get_stock_price(token, name):
             data = response.json()
 
 
-            output = data["output"]
+            outputs = data["output"]
 
 
 
-            return {
+            results = []
 
 
-                "name":
-
-                    name,
+            for output in outputs:
 
 
-                "code":
-
-                    code,
+                code = output["inter_shrn_iscd"]
 
 
-                "open":
-
-                    float(output["stck_oprc"]),
+                name = code_to_name.get(code)
 
 
-                "high":
+                if name is None:
 
-                    float(output["stck_hgpr"]),
-
-
-                "low":
-
-                    float(output["stck_lwpr"]),
+                    continue
 
 
-                "current_price":
 
-                    float(output["stck_prpr"])
+                results.append({
 
-            }
+
+                    "name":
+
+                        name,
+
+
+                    "code":
+
+                        code,
+
+
+                    "open":
+
+                        float(output["inter2_oprc"]),
+
+
+                    "high":
+
+                        float(output["inter2_hgpr"]),
+
+
+                    "low":
+
+                        float(output["inter2_lwpr"]),
+
+
+                    "current_price":
+
+                        float(output["inter2_prpr"])
+
+                })
+
+
+
+            return results
 
 
 
@@ -301,26 +349,25 @@ def get_stock_price(token, name):
 
             if retry < 2:
 
-                # 재시도 간격을 점점 늘려서(0.5초, 1초) 같은 혼잡 구간에
-                # 바로 재요청하지 않도록 함
                 time.sleep(0.5 * (retry + 1))
 
 
             else:
 
-                return {
+                # 배치 전체 실패 시, 배치에 포함된 모든 종목을 실패 처리
+                return [
 
+                    {
 
-                    "name":
+                        "name": name,
 
-                        name,
+                        "error": str(e)
 
+                    }
 
-                    "error":
+                    for name in name_batch
 
-                        str(e)
-
-                }
+                ]
 
 
 
@@ -406,10 +453,31 @@ def main():
 
 
 
+    batches = list(
+
+        chunk_list(stock_names, BATCH_SIZE)
+
+    )
+
+
+    total_batches = len(batches)
+
+
+
+    print(
+
+        f"{BATCH_SIZE}종목씩 "
+
+        f"{total_batches}개 배치로 조회"
+
+    )
+
+
+
 
 
     # -------------------------------
-    # 병렬 조회
+    # 배치 병렬 조회 (배치당 최대 30종목)
     # -------------------------------
 
 
@@ -436,18 +504,18 @@ def main():
 
             executor.submit(
 
-                get_stock_price,
+                get_stock_price_batch,
 
                 token,
 
-                name
+                batch
 
             ):
 
-            name
+            batch
 
 
-            for name in stock_names
+            for batch in batches
 
         }
 
@@ -464,40 +532,40 @@ def main():
 
 
 
-            data = future.result()
+            batch_results = future.result()
 
 
 
-            if "error" in data:
+            for data in batch_results:
 
 
-                fail += 1
-
-                errors.append(data["error"])
+                if "error" in data:
 
 
-            else:
+                    fail += 1
+
+                    errors.append(data["error"])
 
 
-                success += 1
-
-                results.append(data)
+                else:
 
 
+                    success += 1
+
+                    results.append(data)
 
 
-            if idx % 100 == 0 or idx == total:
 
 
-                print(
+            print(
 
-                    f"[{idx}/{total}] "
+                f"[배치 {idx}/{total_batches}] "
 
-                    f"조회 완료 "
+                f"조회 완료 "
 
-                    f"(성공:{success}, 실패:{fail})"
+                f"(누적 성공:{success}, 실패:{fail})"
 
-                )
+            )
 
 
 
