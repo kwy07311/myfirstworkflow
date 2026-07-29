@@ -1,8 +1,10 @@
 import os
 import time
+import threading
 import requests
 import pandas as pd
 
+from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -23,7 +25,55 @@ REAL_URL = "https://openapi.koreainvestment.com:9443"
 HISTORY_FILE = "input/mydata.xlsx"
 
 
-MAX_WORKERS = 10
+MAX_WORKERS = 15
+
+# 초당 허용 호출 수 (KIS 실전 제한 대비 여유값)
+RATE_LIMIT_PER_SEC = 15
+
+
+# ==================================
+# 커넥션 재사용 (Session + Connection Pool)
+# ==================================
+
+_session = requests.Session()
+_adapter = HTTPAdapter(
+    pool_connections=MAX_WORKERS,
+    pool_maxsize=MAX_WORKERS,
+)
+_session.mount("https://", _adapter)
+
+
+# ==================================
+# 초당 호출 수 제한 (Rate Limiter)
+# ==================================
+
+class RateLimiter:
+
+    def __init__(self, calls_per_sec):
+
+        self.interval = 1.0 / calls_per_sec
+
+        self.lock = threading.Lock()
+
+        self.last_call = 0.0
+
+
+    def wait(self):
+
+        with self.lock:
+
+            now = time.time()
+
+            elapsed = now - self.last_call
+
+            if elapsed < self.interval:
+
+                time.sleep(self.interval - elapsed)
+
+            self.last_call = time.time()
+
+
+_rate_limiter = RateLimiter(RATE_LIMIT_PER_SEC)
 
 
 
@@ -187,7 +237,10 @@ def get_stock_price(token, name):
         try:
 
 
-            response = requests.get(
+            _rate_limiter.wait()
+
+
+            response = _session.get(
 
                 url,
 
@@ -248,7 +301,7 @@ def get_stock_price(token, name):
 
             if retry < 2:
 
-                time.sleep(1)
+                time.sleep(0.3)
 
 
             else:
