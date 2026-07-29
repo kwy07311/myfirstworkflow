@@ -1,14 +1,18 @@
-name: KIS Daily Stock Range Update
+name: Daily Stock Range Update
+
 
 on:
+
   workflow_dispatch:
 
   schedule:
-    # 한국시간 15:50 (UTC 06:50)
+    # 한국시간 15:50
     - cron: "50 6 * * 1-5"
+
 
 permissions:
   contents: write
+
 
 jobs:
 
@@ -16,44 +20,60 @@ jobs:
 
     runs-on: ubuntu-latest
 
+
     steps:
+
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+
+
       - name: Install packages
         run: |
           pip install pandas openpyxl pykrx
 
-      - name: Check files
-        run: |
-          cd daily_update
-          pwd
-          ls -la
-          ls -la input
+
 
       - name: Run daily update
+        env:
+          KRX_ID: ${{ secrets.KRX_ID }}
+          KRX_PW: ${{ secrets.KRX_PW }}
+
         run: |
           cd daily_update
           python main.py
 
+
+
       - name: Commit updated data
         run: |
+
           git config --global user.name "github-actions"
+
           git config --global user.email "github-actions@github.com"
+
 
           git add .
 
+
           if git diff --cached --quiet; then
-            echo "No changes to commit"
+
+            echo "No changes"
+
           else
+
             git commit -m "Daily stock range update"
+
             git push
+
           fi
