@@ -41,7 +41,7 @@ MIN_VOLUME_HISTORY_DAYS = 3
 VOLUME_SPIKE_MULTIPLIER = 1.5
 
 # 디버그: 첫 배치에서 API 원본 응답 필드를 한 번 출력할지 여부
-DEBUG_PRINT_RAW_OUTPUT = True
+DEBUG_PRINT_RAW_OUTPUT = False
 
 
 # ==================================
@@ -200,7 +200,7 @@ def get_stock_price_batch(token, name_batch):
                 if name is None:
                     continue
 
-                # inter2_acml_vol : 당일 누적 거래량
+                # acml_vol : 당일 누적 거래량 (※ inter2_acml_vol은 실제 응답에 존재하지 않는 필드였음 - 디버그로 확인됨)
                 results.append({
                     "name": name,
                     "code": code,
@@ -208,7 +208,7 @@ def get_stock_price_batch(token, name_batch):
                     "high": float(output["inter2_hgpr"]),
                     "low": float(output["inter2_lwpr"]),
                     "current_price": float(output["inter2_prpr"]),
-                    "volume": float(output.get("inter2_acml_vol", 0))  # 오늘 누적 거래량 수집
+                    "volume": float(output.get("acml_vol", 0))  # 오늘 누적 거래량 수집
                 })
 
             return results
