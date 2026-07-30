@@ -5,7 +5,7 @@ import threading
 import requests
 import pandas as pd
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from requests.adapters import HTTPAdapter
 
 
@@ -81,7 +81,10 @@ def send_telegram(message):
 # ==================================
 
 def save_result_json(result):
-    now = datetime.now()
+    # UTC 시각에 +9시간을 적용하여 KST(한국 표준시) 생성
+    kst = timezone(timedelta(hours=9))
+    now = datetime.now(kst)
+
     stock_list = result["name"].tolist() if len(result) > 0 else []
 
     data = {
