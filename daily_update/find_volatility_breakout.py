@@ -301,7 +301,7 @@ def main():
     def check_volume_spike(row):
         if row["avg_volume"] <= 0:
             return True  # 과거 거래량 데이터가 없으면 분출 여부 판단을 건너뛰고 조건 통과
-        return row["volume"] >= (row["avg_volume"] * 1.5)
+        return row["volume"] >= (row["avg_volume"] * 0.5)
 
     merged["volume_spike"] = merged.apply(check_volume_spike, axis=1)
 
