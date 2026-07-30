@@ -33,6 +33,13 @@ RATE_LIMIT_PER_SEC = 10
 # 관심종목(멀티종목) 시세조회 API는 1회 호출에 최대 30종목까지 지원
 BATCH_SIZE = 30
 
+# 거래량 평균을 신뢰하기 위해 필요한 최소 과거 데이터 일수
+# (이보다 적으면 avg_volume=0으로 처리하여 거래량 조건을 자동 통과시킴)
+MIN_VOLUME_HISTORY_DAYS = 3
+
+# 거래량 스파이크 판단 배율 (평균 거래량 대비 몇 배 이상이어야 통과인지)
+VOLUME_SPIKE_MULTIPLIER = 1.5
+
 
 # ==================================
 # 커넥션 재사용 (Session + Connection Pool)
@@ -233,7 +240,14 @@ def main():
                 ranges.append(float(val))
 
         max_range = max(ranges) if ranges else 0.0
-        avg_vol = (sum(vols) / len(vols)) if vols else 0.0
+
+        # 거래량 데이터가 MIN_VOLUME_HISTORY_DAYS일 미만으로 쌓여 있으면
+        # 아직 "평균"으로서 의미가 없다고 보고 avg_volume=0 (조건 자동 통과) 처리
+        if len(vols) >= MIN_VOLUME_HISTORY_DAYS:
+            avg_vol = sum(vols) / len(vols)
+        else:
+            avg_vol = 0.0
+
         return pd.Series([max_range, avg_vol], index=["max_history_range", "avg_volume"])
 
     # 행 단위 파싱 실행
@@ -275,15 +289,15 @@ def main():
     # 조건 비교 (변동폭 돌파 & 양봉 & 윗꼬리 10% 미만 & 거래량 1.5배 이상)
     # -------------------------------
     today = pd.DataFrame(results)
-    
+
     if today.empty:
         print("조회된 당일 시세 데이터가 없습니다.")
         send_telegram("📊 오늘 조건 만족 변동폭 돌파 종목 없음 (시세 조회 데이터 없음)")
         return
 
     merged = today.merge(
-        history[["name", "max_history_range", "avg_volume"]], 
-        on="name", 
+        history[["name", "max_history_range", "avg_volume"]],
+        on="name",
         how="inner"
     )
 
@@ -297,11 +311,11 @@ def main():
     # 양봉 판단
     merged["bullish"] = merged["current_price"] > merged["open"]
 
-    # 거래량 조건 판단 (과거 누적된 거래량 데이터가 아직 하나도 없는 경우는 거래량 조건 pass)
+    # 거래량 조건 판단 (과거 거래량 데이터가 충분히 쌓이지 않은 경우는 조건 pass)
     def check_volume_spike(row):
         if row["avg_volume"] <= 0:
-            return True  # 과거 거래량 데이터가 없으면 분출 여부 판단을 건너뛰고 조건 통과
-        return row["volume"] >= (row["avg_volume"] * 0.5)
+            return True  # 과거 거래량 데이터가 없거나 부족하면 분출 여부 판단을 건너뛰고 조건 통과
+        return row["volume"] >= (row["avg_volume"] * VOLUME_SPIKE_MULTIPLIER)
 
     merged["volume_spike"] = merged.apply(check_volume_spike, axis=1)
 
@@ -310,7 +324,7 @@ def main():
         (merged["today_range"] > merged["max_history_range"])  # 과거 최대 변동폭 돌파
         & (merged["bullish"])                                  # 양봉
         & (merged["upper_shadow_ratio"] < 0.1)                 # 윗꼬리 10% 미만
-        & (merged["volume_spike"])                             # 과거 평균 대비 1.5배 이상 거래량 (또는 첫날 통과)
+        & (merged["volume_spike"])                             # 과거 평균 대비 1.5배 이상 거래량 (또는 데이터 부족 시 통과)
     ]
 
     save_result_json(result)
@@ -319,7 +333,7 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        message = "📈 변동폭 돌파 종목 (거래량 1.5배 분출)\n\n"
+        message = f"📈 변동폭 돌파 종목 (거래량 {VOLUME_SPIKE_MULTIPLIER}배 분출)\n\n"
         for name in result["name"]:
             print("★", name)
             message += f"★ {name}\n"
