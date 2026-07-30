@@ -8,10 +8,6 @@ import pandas as pd
 from datetime import datetime
 from requests.adapters import HTTPAdapter
 
-print("현재 실행 파일:", os.path.abspath(__file__))
-print("현재 작업 폴더:", os.getcwd())
-print("JSON 저장 위치:", os.path.abspath(RESULT_JSON))
-
 
 # ==================================
 # 환경 설정
