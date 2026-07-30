@@ -188,7 +188,7 @@ def get_stock_price_batch(token, name_batch):
                     "high": float(output["inter2_hgpr"]),
                     "low": float(output["inter2_lwpr"]),
                     "current_price": float(output["inter2_prpr"]),
-                    "volume": float(output.get("inter2_acml_vol", 0))  # ⭕ 오늘 누적 거래량 수집
+                    "volume": float(output.get("inter2_acml_vol", 0))  # 오늘 누적 거래량 수집
                 })
 
             return results
@@ -215,21 +215,31 @@ def main():
     # 과거 데이터 및 전체 평균 거래량 계산
     # -------------------------------
     history = pd.read_excel(HISTORY_FILE)
+    date_columns = [c for c in history.columns if c != "name"]
 
-    # 1. 변동폭 컬럼 구분 (range_로 시작하는 컬럼이 있거나, name과 vol_을 제외한 컬럼)
-    range_cols = [c for c in history.columns if c.startswith("range_")]
-    if not range_cols:
-        range_cols = [c for c in history.columns if c != "name" and not c.startswith("vol_")]
+    # 각 행(종목)별로 과거 최대 변동폭과 평균 거래량을 구하는 행 단위 처리 함수
+    def parse_history_row(row):
+        ranges = []
+        vols = []
+        for col in date_columns:
+            val = str(row[col])
+            if val and val != "nan" and "_" in val:
+                # "2500_1523000" (변동폭_거래량) 형태
+                r, v = val.split("_")
+                ranges.append(float(r))
+                vols.append(float(v))
+            elif val and val != "nan":
+                # 기존 데이터(거래량 없이 숫자만 있던 과거 데이터 예외 처리)
+                ranges.append(float(val))
 
-    history["max_history_range"] = history[range_cols].max(axis=1)
+        max_range = max(ranges) if ranges else 0.0
+        avg_vol = (sum(vols) / len(vols)) if vols else 0.0
+        return pd.Series([max_range, avg_vol], index=["max_history_range", "avg_volume"])
 
-    # 2. 거래량 컬럼 구분 (vol_로 시작하는 컬럼의 행 단위 전체 평균 계산)
-    vol_cols = [c for c in history.columns if c.startswith("vol_")]
-    if vol_cols:
-        history["avg_volume"] = history[vol_cols].mean(axis=1)
-    else:
-        # 엑셀에 별도 vol_ 컬럼 구분이 없는 경우를 대비한 안전 장치
-        history["avg_volume"] = 0
+    # 행 단위 파싱 실행
+    parsed_df = history.apply(parse_history_row, axis=1)
+    history["max_history_range"] = parsed_df["max_history_range"]
+    history["avg_volume"] = parsed_df["avg_volume"]
 
     token = get_access_token()
     stock_names = history["name"].tolist()
@@ -265,6 +275,12 @@ def main():
     # 조건 비교 (변동폭 돌파 & 양봉 & 윗꼬리 10% 미만 & 거래량 1.5배 이상)
     # -------------------------------
     today = pd.DataFrame(results)
+    
+    if today.empty:
+        print("조회된 당일 시세 데이터가 없습니다.")
+        send_telegram("📊 오늘 조건 만족 변동폭 돌파 종목 없음 (시세 조회 데이터 없음)")
+        return
+
     merged = today.merge(
         history[["name", "max_history_range", "avg_volume"]], 
         on="name", 
@@ -281,15 +297,20 @@ def main():
     # 양봉 판단
     merged["bullish"] = merged["current_price"] > merged["open"]
 
-    # 상대 거래량 조건: 오늘 거래량이 과거 전체 평균의 1.5배 이상인지 확인
-    merged["volume_spike"] = merged["volume"] >= (merged["avg_volume"] * 1.5)
+    # 거래량 조건 판단 (과거 누적된 거래량 데이터가 아직 하나도 없는 경우는 거래량 조건 pass)
+    def check_volume_spike(row):
+        if row["avg_volume"] <= 0:
+            return True  # 과거 거래량 데이터가 없으면 분출 여부 판단을 건너뛰고 조건 통과
+        return row["volume"] >= (row["avg_volume"] * 1.5)
+
+    merged["volume_spike"] = merged.apply(check_volume_spike, axis=1)
 
     # 최종 스크리닝
     result = merged[
         (merged["today_range"] > merged["max_history_range"])  # 과거 최대 변동폭 돌파
         & (merged["bullish"])                                  # 양봉
         & (merged["upper_shadow_ratio"] < 0.1)                 # 윗꼬리 10% 미만
-        & (merged["volume_spike"])                             # 과거 전체 평균 대비 1.5배 이상 거래량 분출
+        & (merged["volume_spike"])                             # 과거 평균 대비 1.5배 이상 거래량 (또는 첫날 통과)
     ]
 
     save_result_json(result)
