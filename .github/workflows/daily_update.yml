@@ -1,8 +1,7 @@
 name: Daily Stock Range Update
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "50 6 * * 1-5"
+
 permissions:
   contents: write
 jobs:
