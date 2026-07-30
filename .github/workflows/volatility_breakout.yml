@@ -2,9 +2,6 @@ name: Volatility Breakout Scan
 
 on:
   workflow_dispatch:
-  schedule:
-    # 한국시간 평일 15:00 실행 (06:00 UTC)
-    - cron: "0 6 * * 1-5"
 
 # ⭐ 1. Git Push를 가능하게 하려면 쓰기 권한(write)이 필요합니다.
 permissions:
