@@ -1,0 +1,34 @@
+name: volatility update
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+
+    - name: python setup
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: install
+      run: |
+        pip install -r requirements.txt
+
+    - name: run
+      env:
+        KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+        KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+      run: |
+        python make_volatility_excel.py
+
+    - name: save result
+      uses: actions/upload-artifact@v4
+      with:
+        name: volatility_result
+        path: volatility_result.xlsx
