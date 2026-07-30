@@ -1,92 +1,59 @@
 name: Volatility Breakout Scan
 
-
 on:
-
   workflow_dispatch:
-
-
   schedule:
-    # 한국시간 평일 15:00 실행
-    # GitHub Actions UTC 기준
-    # 06:00 UTC = 한국시간 15:00
+    # 한국시간 평일 15:00 실행 (06:00 UTC)
     - cron: "0 6 * * 1-5"
 
-
-
+# ⭐ 1. Git Push를 가능하게 하려면 쓰기 권한(write)이 필요합니다.
 permissions:
-  contents: read
-
-
+  contents: write
 
 jobs:
-
-
   breakout-scan:
-
-
     runs-on: ubuntu-latest
 
-
-
     steps:
-
-
       # 저장소 가져오기
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
-
       # Python 설치
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-
-
       # 라이브러리 설치
-
       - name: Install packages
         run: |
           pip install pandas openpyxl requests
 
-
-
       # 변동폭 돌파 검색 실행
-
       - name: Run volatility breakout scan
-
         env:
-
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
-
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
-
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-
         run: |
-
           cd daily_update
-
           python find_volatility_breakout.py
 
+      # ⭐ 2. 새로 생성/수정된 docs/data.json 파일을 저장소에 커밋 & 푸시
+      - name: Commit and Push data.json
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add docs/data.json
+          # 변경 사항이 있을 때만 커밋 (에러 방지용 || exit 0)
+          git commit -m "auto: update volatility breakout data.json" || exit 0
+          git push
 
-
-      # 결과 파일 보관
-
+      # (선택 사항) 결과 엑셀 파일 artifact 보관은 기존대로 유지
       - name: Upload result
-
         uses: actions/upload-artifact@v4
-
         with:
-
           name: volatility-breakout-result
-
           path: daily_update/output/volatility_breakout_result.xlsx
