@@ -98,7 +98,7 @@ def save_result_json(result):
     with open(RESULT_JSON, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    print(f"결과 JSON 저장 완료 : {RESULT_JSON}")
+    print(f"결과 JSON 저장 완료 (KST 시간: {now.strftime('%Y-%m-%d %H:%M:%S')}) : {RESULT_JSON}")
 
 
 # ==================================
@@ -136,14 +136,10 @@ def chunk_list(items, size):
 
 
 # ==================================
-# 현재가 조회 (관심종목 멀티종목 시세조회 - 최대 30종목/1회)
+# 현재가 및 당일 누적 거래량 조회 (최대 30종목/1회)
 # ==================================
 
 def get_stock_price_batch(token, name_batch):
-    """
-    name_batch: 원본 name(예: '삼성전자_005930') 리스트, 최대 30개
-    반환: [{'name':.., 'code':.., 'open':.., 'high':.., 'low':.., 'current_price':..}, ...]
-    """
     code_to_name = {extract_code(name): name for name in name_batch}
 
     url = f"{REAL_URL}/uapi/domestic-stock/v1/quotations/intstock-multprice"
@@ -168,7 +164,6 @@ def get_stock_price_batch(token, name_batch):
             data = response.json()
 
             if "output" not in data:
-                # KIS가 에러를 반환한 경우, 실제 사유(rt_cd/msg_cd/msg1)를 그대로 노출
                 raise RuntimeError(
                     f"HTTP {response.status_code} / "
                     f"rt_cd={data.get('rt_cd')} "
@@ -185,13 +180,15 @@ def get_stock_price_batch(token, name_batch):
                 if name is None:
                     continue
 
+                # inter2_acml_vol : 당일 누적 거래량
                 results.append({
                     "name": name,
                     "code": code,
                     "open": float(output["inter2_oprc"]),
                     "high": float(output["inter2_hgpr"]),
                     "low": float(output["inter2_lwpr"]),
-                    "current_price": float(output["inter2_prpr"])
+                    "current_price": float(output["inter2_prpr"]),
+                    "volume": float(output.get("inter2_acml_vol", 0))  # ⭕ 오늘 누적 거래량 수집
                 })
 
             return results
@@ -200,7 +197,6 @@ def get_stock_price_batch(token, name_batch):
             if retry < 2:
                 time.sleep(0.5 * (retry + 1))
             else:
-                # 배치 전체 실패 시, 배치에 포함된 모든 종목을 실패 처리
                 return [{"name": name, "error": str(e)} for name in name_batch]
 
 
@@ -216,11 +212,24 @@ def main():
     print("=" * 40)
 
     # -------------------------------
-    # 과거 데이터
+    # 과거 데이터 및 전체 평균 거래량 계산
     # -------------------------------
     history = pd.read_excel(HISTORY_FILE)
-    date_columns = [c for c in history.columns if c != "name"]
-    history["max_history_range"] = history[date_columns].max(axis=1)
+
+    # 1. 변동폭 컬럼 구분 (range_로 시작하는 컬럼이 있거나, name과 vol_을 제외한 컬럼)
+    range_cols = [c for c in history.columns if c.startswith("range_")]
+    if not range_cols:
+        range_cols = [c for c in history.columns if c != "name" and not c.startswith("vol_")]
+
+    history["max_history_range"] = history[range_cols].max(axis=1)
+
+    # 2. 거래량 컬럼 구분 (vol_로 시작하는 컬럼의 행 단위 전체 평균 계산)
+    vol_cols = [c for c in history.columns if c.startswith("vol_")]
+    if vol_cols:
+        history["avg_volume"] = history[vol_cols].mean(axis=1)
+    else:
+        # 엑셀에 별도 vol_ 컬럼 구분이 없는 경우를 대비한 안전 장치
+        history["avg_volume"] = 0
 
     token = get_access_token()
     stock_names = history["name"].tolist()
@@ -232,9 +241,7 @@ def main():
     print(f"{BATCH_SIZE}종목씩 {total_batches}개 배치로 조회")
 
     # -------------------------------
-    # 배치 순차 조회 (배치당 최대 30종목)
-    # 동시 요청이 겹치면 KIS 서버가 "초당 거래건수 초과"로 판단하는
-    # 문제가 있어, 병렬 대신 순차 + RateLimiter 조합으로 처리
+    # 배치 순차 조회
     # -------------------------------
     results = []
     errors = []
@@ -255,19 +262,34 @@ def main():
         print(f"[배치 {idx}/{total_batches}] 조회 완료 (누적 성공:{success}, 실패:{fail})")
 
     # -------------------------------
-    # 비교
+    # 조건 비교 (변동폭 돌파 & 양봉 & 윗꼬리 10% 미만 & 거래량 1.5배 이상)
     # -------------------------------
     today = pd.DataFrame(results)
-    merged = today.merge(history[["name", "max_history_range"]], on="name", how="inner")
+    merged = today.merge(
+        history[["name", "max_history_range", "avg_volume"]], 
+        on="name", 
+        how="inner"
+    )
 
+    # 당일 변동폭 계산
     merged["today_range"] = merged["high"] - merged["low"]
-    merged["upper_shadow_ratio"] = (merged["high"] - merged["current_price"]) / merged["today_range"]
+
+    # 0으로 나누기(DivByZero) 방지 처리
+    safe_range = merged["today_range"].replace(0, float('nan'))
+    merged["upper_shadow_ratio"] = (merged["high"] - merged["current_price"]) / safe_range
+
+    # 양봉 판단
     merged["bullish"] = merged["current_price"] > merged["open"]
 
+    # 상대 거래량 조건: 오늘 거래량이 과거 전체 평균의 1.5배 이상인지 확인
+    merged["volume_spike"] = merged["volume"] >= (merged["avg_volume"] * 1.5)
+
+    # 최종 스크리닝
     result = merged[
-        (merged["today_range"] > merged["max_history_range"])
-        & (merged["bullish"])
-        & (merged["upper_shadow_ratio"] < 0.1)
+        (merged["today_range"] > merged["max_history_range"])  # 과거 최대 변동폭 돌파
+        & (merged["bullish"])                                  # 양봉
+        & (merged["upper_shadow_ratio"] < 0.1)                 # 윗꼬리 10% 미만
+        & (merged["volume_spike"])                             # 과거 전체 평균 대비 1.5배 이상 거래량 분출
     ]
 
     save_result_json(result)
@@ -276,7 +298,7 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        message = "📈 변동폭 돌파 종목\n\n"
+        message = "📈 변동폭 돌파 종목 (거래량 1.5배 분출)\n\n"
         for name in result["name"]:
             print("★", name)
             message += f"★ {name}\n"
