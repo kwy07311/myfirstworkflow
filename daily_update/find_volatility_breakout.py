@@ -400,6 +400,12 @@ def main():
     print(f"실행 시간 : {elapsed:.1f}초")
     print("=" * 40)
 
+    print("변동폭 돌파:", (merged["today_range"] > merged["max_history_range"]).sum())
+    print("양봉:", merged["bullish"].sum())
+    print("윗꼬리 10% 미만:", (merged["upper_shadow_ratio"] < 0.1).sum())
+    print("거래량 스파이크:", merged["volume_spike"].sum())
+    print("전체 종목 수:", len(merged))
+
 
 if __name__ == "__main__":
     main()
