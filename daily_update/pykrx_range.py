@@ -5,7 +5,8 @@ from logger import log
 
 
 def get_trade_date():
-    today = datetime.now()
+    kst = timezone(timedelta(hours=9))
+    today = datetime.now(kst)
     return today.strftime("%Y%m%d")
 
 
