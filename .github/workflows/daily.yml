@@ -1,34 +1,36 @@
-name: volatility update
+name: Make Volatility Excel
 
 on:
   workflow_dispatch:
 
 jobs:
-  run:
+  run-script:
     runs-on: ubuntu-latest
-
     steps:
-    - name: checkout
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: python setup
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: install
-      run: |
-        pip install -r requirements.txt
+      - name: Install dependencies
+        run: |
+          pip install requests pandas openpyxl urllib3
 
-    - name: run
-      env:
-        KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
-        KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
-      run: |
-        python make_volatility_excel.py
+      - name: Run script
+        env:
+          KIS_APPKEY: ${{ secrets.KIS_APPKEY }}
+          KIS_APPSECRET: ${{ secrets.KIS_APPSECRET }}
+          KIS_BASE_URL: "https://openapi.koreainvestment.com:9443"
+        run: |
+          python make_volatility_excel.py
 
-    - name: save result
-      uses: actions/upload-artifact@v4
-      with:
-        name: volatility_result
-        path: volatility_result.xlsx
+      - name: Commit and push result
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add volatility_result.xlsx
+          git commit -m "Update volatility results" || exit 0
+          git push
