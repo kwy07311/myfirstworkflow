@@ -235,7 +235,31 @@ def main():
     # 과거 데이터 및 전체 평균 거래량 계산
     # -------------------------------
     history = pd.read_excel(HISTORY_FILE)
-    date_columns = [c for c in history.columns if c != "name"]
+
+    all_date_columns = [c for c in history.columns if c != "name"]
+
+    # 오늘 날짜(KST)에 해당하는 컬럼이 이미 들어가 있다면
+    # 과거 데이터 집계(max_history_range, avg_volume)에서는 제외한다.
+    # -> daily_add_price.py가 먼저 실행되어 오늘 컬럼이 채워진 뒤에 이 스크립트를
+    #    돌리더라도(장중/장마감 상관없이), 항상 "오늘 실시간 시세 vs 어제까지의
+    #    과거 데이터"로 비교되도록 보장한다.
+    _kst = timezone(timedelta(hours=9))
+    _today_kst = datetime.now(_kst).date()
+
+    def _is_today_column(col):
+        try:
+            return pd.to_datetime(str(col)).date() == _today_kst
+        except (ValueError, TypeError):
+            # 날짜로 파싱되지 않는 컬럼명이면 과거 데이터로 취급(제외하지 않음)
+            return False
+
+    today_column_found = [c for c in all_date_columns if _is_today_column(c)]
+    date_columns = [c for c in all_date_columns if not _is_today_column(c)]
+
+    if today_column_found:
+        print(f"오늘 날짜 컬럼 감지({today_column_found}) → 비교 대상에서 제외하고 어제까지 데이터로 계산합니다.")
+    else:
+        print("오늘 날짜 컬럼 없음 → 전체 과거 데이터로 계산합니다.")
 
     # 각 행(종목)별로 과거 최대 변동폭과 평균 거래량을 구하는 행 단위 처리 함수
     def parse_history_row(row):
