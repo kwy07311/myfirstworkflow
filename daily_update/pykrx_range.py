@@ -1,6 +1,6 @@
 import pandas as pd
 from pykrx import stock
-from datetime import datetime
+from datetime import datetime, timedelta, timezone  # timezone 추가!
 from logger import log
 
 
