@@ -40,6 +40,9 @@ MIN_VOLUME_HISTORY_DAYS = 3
 # 거래량 스파이크 판단 배율 (평균 거래량 대비 몇 배 이상이어야 통과인지)
 VOLUME_SPIKE_MULTIPLIER = 1.5
 
+# 디버그: 첫 배치에서 API 원본 응답 필드를 한 번 출력할지 여부
+DEBUG_PRINT_RAW_OUTPUT = True
+
 
 # ==================================
 # 커넥션 재사용 (Session + Connection Pool)
@@ -179,6 +182,16 @@ def get_stock_price_batch(token, name_batch):
                 )
 
             outputs = data["output"]
+
+            # ---- 디버그: 최초 1회만 원본 응답 필드 전체 출력 ----
+            if DEBUG_PRINT_RAW_OUTPUT and not getattr(get_stock_price_batch, "_printed", False):
+                print("=" * 40)
+                print("DEBUG: API 원본 응답 (첫 종목 전체 필드)")
+                print(outputs[0])
+                print("=" * 40)
+                get_stock_price_batch._printed = True
+            # ------------------------------------------------
+
             results = []
 
             for output in outputs:
