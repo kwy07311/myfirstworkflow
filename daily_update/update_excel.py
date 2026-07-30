@@ -21,6 +21,7 @@ def update_excel():
 
     log(f"조회 종목 수 : {len(codes)}")
 
+    # get_range_data에서 (변동폭_거래량) 형태의 dict를 반환받습니다.
     date, range_data = get_range_data(codes)
     log(f"{date} 데이터 업데이트")
 
@@ -31,10 +32,10 @@ def update_excel():
         if code in range_data:
             df.at[idx, date] = range_data[code]
 
-    # name을 제외한 날짜 칼럼만 추출 (등장 순서 = 오래된 순 -> 최신 순으로 쌓인다고 가정)
+    # name을 제외한 날짜 칼럼만 추출 (오래된 순 -> 최신 순)
     date_columns = [col for col in df.columns if col != "name"]
 
-    # 최대 개수를 초과하면 가장 오래된(왼쪽) 날짜 칼럼부터 삭제
+    # 10개가 넘어가면 가장 오래된(왼쪽) 날짜 칼럼 자동 삭제
     if len(date_columns) > MAX_DATE_COLUMNS:
         columns_to_drop = date_columns[: len(date_columns) - MAX_DATE_COLUMNS]
         df = df.drop(columns=columns_to_drop)
