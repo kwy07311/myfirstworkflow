@@ -31,7 +31,7 @@ def get_token():
     url = f"{BASE_URL}/oauth2/tokenP"
 
     headers = {
-        "content-type": "application/json"
+        "content-type": "application/json; charset=utf-8"
     }
 
     body = {
@@ -40,10 +40,18 @@ def get_token():
         "appsecret": APP_SECRET
     }
 
-    r = requests.post(url, headers=headers, json=body)
-    r.raise_for_status()
+    response = requests.post(
+        url,
+        headers=headers,
+        json=body
+    )
 
-    TOKEN = r.json()["access_token"]
+    print("TOKEN RESPONSE:")
+    print(response.text)
+
+    response.raise_for_status()
+
+    TOKEN = response.json()["access_token"]
 
     return TOKEN
 
