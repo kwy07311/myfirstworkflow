@@ -405,6 +405,7 @@ def main():
     print("윗꼬리 10% 미만:", (merged["upper_shadow_ratio"] < 0.1).sum())
     print("거래량 스파이크:", merged["volume_spike"].sum())
     print("전체 종목 수:", len(merged))
+    print(merged[["name", "open", "high", "low", "current_price", "today_range", "max_history_range"]].head(10))
 
 
 if __name__ == "__main__":
