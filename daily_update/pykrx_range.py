@@ -28,7 +28,13 @@ def get_range_data(codes):
     for code in codes:
         if code in df_all.index:
             row = df_all.loc[code]
-            result[code] = row["고가"] - row["저가"]
+            
+            # 고가-저가(변동폭) 및 거래량 추출
+            price_range = int(row["고가"] - row["저가"])
+            volume = int(row["거래량"])
+            
+            # "변동폭_거래량" 형태로 결합 (예: "2500_1523000")
+            result[code] = f"{price_range}_{volume}"
         else:
             log(f"{code} 조회 실패 : 데이터 없음")
 
