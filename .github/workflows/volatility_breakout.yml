@@ -1,5 +1,4 @@
 name: Volatility Breakout Scan
-
 on:
   workflow_dispatch:
 
@@ -10,7 +9,6 @@ permissions:
 jobs:
   breakout-scan:
     runs-on: ubuntu-latest
-
     steps:
       # 저장소 가져오기
       - name: Checkout repository
@@ -27,6 +25,19 @@ jobs:
         run: |
           pip install pandas openpyxl requests
 
+      # ⭐ 2. 암호화된 토큰 캐시가 있으면 복호화 (없으면 그냥 통과)
+      - name: Decrypt cached token
+        run: |
+          if [ -f daily_update/.token_state.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 \
+              -in daily_update/.token_state.enc \
+              -out daily_update/.token_state.json \
+              -pass pass:"${{ secrets.TOKEN_CACHE_KEY }}" \
+              || echo "복호화 실패 (키 변경 등) → 새로 발급됩니다"
+          else
+            echo "캐시된 토큰 없음 → 새로 발급됩니다"
+          fi
+
       # 변동폭 돌파 검색 실행
       - name: Run volatility breakout scan
         env:
@@ -38,12 +49,25 @@ jobs:
           cd daily_update
           python find_volatility_breakout.py
 
-      # ⭐ 2. 새로 생성/수정된 docs/data.json 파일을 저장소에 커밋 & 푸시
-      - name: Commit and Push data.json
+      # ⭐ 3. 토큰 상태 파일을 다시 암호화하고, 평문 파일은 즉시 삭제
+      - name: Encrypt token state
+        if: always()
+        run: |
+          if [ -f daily_update/.token_state.json ]; then
+            openssl enc -e -aes-256-cbc -pbkdf2 \
+              -in daily_update/.token_state.json \
+              -out daily_update/.token_state.enc \
+              -pass pass:"${{ secrets.TOKEN_CACHE_KEY }}"
+            rm -f daily_update/.token_state.json
+          fi
+
+      # ⭐ 4. 새로 생성/수정된 docs/data.json + 암호화된 토큰 캐시를 저장소에 커밋 & 푸시
+      - name: Commit and Push data.json + token cache
+        if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add docs/data.json
+          git add docs/data.json daily_update/.token_state.enc
           # 변경 사항이 있을 때만 커밋 (에러 방지용 || exit 0)
           git commit -m "auto: update volatility breakout data.json" || exit 0
           git push
