@@ -24,6 +24,14 @@ REAL_URL = "https://openapi.koreainvestment.com:9443"
 HISTORY_FILE = "input/mydata.xlsx"
 RESULT_JSON = "../docs/data.json"
 
+# 토큰 캐시 파일 (workflow에서 실행 전/후로 암호화·복호화됨)
+# 스크립트가 daily_update/ 안에서 실행되므로 상대경로 그대로 사용
+TOKEN_STATE_FILE = ".token_state.json"
+
+# 만료 판단시 안전마진(분). KIS 발급 유효기간은 24시간이지만,
+# 실행 도중 만료되는 걸 막기 위해 여유를 두고 재발급 판단.
+TOKEN_SAFETY_MARGIN_MIN = 30
+
 # 순차 처리이므로 커넥션 풀은 1개면 충분
 MAX_WORKERS = 1
 
@@ -112,10 +120,41 @@ def save_result_json(result):
 
 
 # ==================================
-# 토큰 발급
+# 토큰 발급 (캐싱 적용)
 # ==================================
 
-def get_access_token():
+def _load_cached_token():
+    """캐시 파일에서 유효한 토큰을 읽어온다. 없거나 만료됐으면 None 반환."""
+    if not os.path.exists(TOKEN_STATE_FILE):
+        return None
+
+    try:
+        with open(TOKEN_STATE_FILE, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+
+        token = cached.get("access_token")
+        expire_at_str = cached.get("expire_at")
+        if not token or not expire_at_str:
+            return None
+
+        expire_at = datetime.fromisoformat(expire_at_str)
+        now = datetime.now(timezone.utc)
+        remaining = expire_at - now
+
+        if remaining > timedelta(minutes=TOKEN_SAFETY_MARGIN_MIN):
+            print(f"캐시된 토큰 재사용 (만료까지 약 {remaining}남음)")
+            return token
+        else:
+            print("캐시된 토큰이 곧 만료되거나 이미 만료됨 → 재발급 진행")
+            return None
+
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        print(f"토큰 캐시 파일 파싱 실패({e}) → 재발급 진행")
+        return None
+
+
+def _issue_new_token():
+    """KIS 서버에 실제로 새 토큰을 요청하고 캐시 파일에 저장한다."""
     url = f"{REAL_URL}/oauth2/tokenP"
     body = {
         "grant_type": "client_credentials",
@@ -124,7 +163,29 @@ def get_access_token():
     }
     response = requests.post(url, json=body, timeout=10)
     response.raise_for_status()
-    return response.json()["access_token"]
+    data = response.json()
+
+    token = data["access_token"]
+
+    # KIS가 내려주는 만료시각(access_token_token_expired)이 있으면 활용하되,
+    # 없거나 형식이 다를 경우를 대비해 발급시각 + 23시간으로 안전하게 계산
+    expire_at = datetime.now(timezone.utc) + timedelta(hours=23)
+
+    with open(TOKEN_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump({
+            "access_token": token,
+            "expire_at": expire_at.isoformat()
+        }, f)
+
+    print(f"새 토큰 발급 완료 (만료 예정: {expire_at.isoformat()})")
+    return token
+
+
+def get_access_token():
+    cached = _load_cached_token()
+    if cached:
+        return cached
+    return _issue_new_token()
 
 
 # ==================================
@@ -217,6 +278,13 @@ def get_stock_price_batch(token, name_batch):
             if retry < 2:
                 time.sleep(0.5 * (retry + 1))
             else:
+                # 토큰 자체가 만료/무효화되어 거부된 경우, 캐시를 삭제해서
+                # 다음 실행 때 재발급 로직이 확실히 새 토큰을 받도록 한다.
+                msg = str(e)
+                if "EGW00121" in msg or "기간이 만료" in msg or "인증" in msg:
+                    if os.path.exists(TOKEN_STATE_FILE):
+                        os.remove(TOKEN_STATE_FILE)
+                        print("토큰 인증 오류 감지 → 캐시 파일 삭제(다음 실행 시 재발급)")
                 return [{"name": name, "error": str(e)} for name in name_batch]
 
 
