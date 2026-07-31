@@ -4,6 +4,7 @@ on:
 
 permissions:
   contents: write
+
 jobs:
   daily-update:
     runs-on: ubuntu-latest
@@ -30,21 +31,11 @@ jobs:
           cd daily_update
           python daily_add_price.py
 
-      - name: Run volatility breakout search
-        env:
-          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
-          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          cd daily_update
-          python find_volatility_breakout.py
-
       - name: Commit updated data
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
-          git add .
+          git add daily_update/input/mydata.xlsx
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
