@@ -1,44 +1,104 @@
 name: Daily Stock Range Update
+
+
 on:
+
   workflow_dispatch:
 
+    inputs:
+
+      target_date:
+
+        description: "조회 날짜 입력 (YYMMDD, 예: 260805)"
+
+        required: false
+
+        default: ""
+
+
+
 permissions:
+
   contents: write
 
+
+
 jobs:
+
+
   daily-update:
+
+
     runs-on: ubuntu-latest
+
+
+
     steps:
+
+
       - name: Checkout repository
+
         uses: actions/checkout@v4
+
         with:
+
           fetch-depth: 0
 
+
+
       - name: Setup Python
+
         uses: actions/setup-python@v5
+
         with:
+
           python-version: "3.11"
 
+
+
       - name: Install packages
+
         run: |
+
           pip install pandas openpyxl pykrx requests
 
+
+
       - name: Run daily price update
+
         env:
+
           KRX_ID: ${{ secrets.KRX_ID }}
+
           KRX_PW: ${{ secrets.KRX_PW }}
+
         run: |
+
           cd daily_update
-          python daily_add_price.py
+
+          python daily_add_price.py "${{ github.event.inputs.target_date }}"
+
+
 
       - name: Commit updated data
+
         run: |
+
           git config --global user.name "github-actions"
+
           git config --global user.email "github-actions@github.com"
+
           git add daily_update/input/mydata.xlsx
+
+
           if git diff --cached --quiet; then
+
             echo "No changes to commit"
+
           else
+
             git commit -m "Daily stock range update"
+
             git push
+
           fi
