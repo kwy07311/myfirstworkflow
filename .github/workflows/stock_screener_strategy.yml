@@ -1,4 +1,4 @@
-name: 5일선 반환
+name: Stock Screener - MA Reversal Scan
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ jobs:
       # 라이브러리 설치
       - name: Install packages
         run: |
-          pip install pandas openpyxl requests
+          pip install pandas openpyxl requests numpy
 
       # ⭐ 2. 암호화된 토큰 캐시가 있으면 복호화 (없으면 그냥 통과)
       - name: Decrypt cached token
