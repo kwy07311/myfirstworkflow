@@ -1,4 +1,4 @@
-name: 5일선 돌파 업데이트
+name: 5일선 돌파 데이터 업데이트
 
 on:
   workflow_dispatch:
@@ -29,7 +29,7 @@ jobs:
         run: |
           pip install pandas openpyxl pykrx requests
 
-      - name: [진단] import되는 파일 경로 확인
+      - name: 진단 - import되는 파일 경로 확인
         run: |
           cd stock_screener
           python -c "
