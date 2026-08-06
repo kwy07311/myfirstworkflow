@@ -1,73 +1,50 @@
-import pandas as pd
-from pykrx_range import get_range_data
-from logger import log
+name: Stock Screener - Update Excel
 
-STOCK_FILE = "input/mydata2.xlsx"
-MAX_DATE_COLUMNS = 60   # 기존 daily_update는 10일치, stock_screener는 20일 이평선 계산을 위해 60일치 보관
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "조회 날짜 입력 (YYMMDD, 예: 260806)"
+        required: false
+        default: ""
 
+permissions:
+  contents: write
 
-def extract_code(value):
-    value = str(value)
-    code = value.split("_")[-1]
-    return code.zfill(6)
+jobs:
+  screener-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-def update_excel(target_date=None):
+      - name: Install packages
+        run: |
+          pip install pandas openpyxl pykrx requests
 
-    df = pd.read_excel(STOCK_FILE)
+      - name: Run daily price update
+        env:
+          KRX_ID: ${{ secrets.KRX_ID }}
+          KRX_PW: ${{ secrets.KRX_PW }}
+        run: |
+          cd stock_screener
+          python daily_add_price.py "${{ github.event.inputs.target_date }}"
 
-    codes = []
-
-    for value in df["name"]:
-        code = extract_code(value)
-        codes.append(code)
-
-    log(f"조회 종목 수 : {len(codes)}")
-
-
-    # 날짜 지정 조회
-    date, range_data = get_range_data(
-        codes,
-        target_date
-    )
-
-    log(f"{date} 데이터 업데이트")
-
-
-    if date not in df.columns:
-        df[date] = None
-
-
-    for idx, code in enumerate(codes):
-
-        if code in range_data:
-            df.at[idx, date] = range_data[code]
-
-
-    # name 제외 날짜 컬럼
-    date_columns = [
-        col for col in df.columns
-        if col != "name"
-    ]
-
-
-    # 최근 60개(MAX_DATE_COLUMNS)만 유지
-    if len(date_columns) > MAX_DATE_COLUMNS:
-
-        columns_to_drop = date_columns[
-            :len(date_columns) - MAX_DATE_COLUMNS
-        ]
-
-        df = df.drop(columns=columns_to_drop)
-
-        log(
-            f"오래된 날짜 칼럼 삭제 : {columns_to_drop}"
-        )
-
-
-    df.to_excel(
-        STOCK_FILE,
-        index=False
-    )
-
-    log("엑셀 업데이트 완료")
+      - name: Commit updated data
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add stock_screener/input/mydata2.xlsx
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Stock screener daily price update"
+            git push
+          fi
