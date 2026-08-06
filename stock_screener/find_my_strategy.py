@@ -455,19 +455,36 @@ def main():
     # -------------------------------
     history = pd.read_excel(HISTORY_FILE)
 
+    # 칼럼 헤더 형식 통일 (update_excel.py와 동일한 방식: datetime/대시 포함 등을 전부 YYMMDD 문자열로)
+    def _normalize_date_column(col):
+        if col == "name":
+            return col
+        if isinstance(col, (pd.Timestamp, datetime)):
+            return col.strftime("%y%m%d")
+        col_str = str(col).strip()
+        if "-" in col_str:
+            try:
+                parsed = datetime.strptime(col_str, "%y-%m-%d")
+                return parsed.strftime("%y%m%d")
+            except ValueError:
+                pass
+        try:
+            return str(int(float(col_str))).zfill(6)
+        except ValueError:
+            return col_str
+
+    history.columns = [_normalize_date_column(c) for c in history.columns]
+
     all_date_columns = [c for c in history.columns if c != "name"]
 
     # 오늘 날짜(KST) 컬럼이 이미 들어가 있다면 이평선 계산에서는 제외
     # (daily_add_price.py가 먼저 실행되어 오늘 컬럼이 채워진 뒤에 이 스크립트를 돌리더라도
     #  항상 "오늘 실시간 시세 vs 어제까지의 과거 데이터"로 비교되도록 보장)
     _kst = timezone(timedelta(hours=9))
-    _today_kst = datetime.now(_kst).date()
+    _today_kst_str = datetime.now(_kst).strftime("%y%m%d")  # 예: "260806"
 
     def _is_today_column(col):
-        try:
-            return pd.to_datetime(str(col)).date() == _today_kst
-        except (ValueError, TypeError):
-            return False
+        return str(col) == _today_kst_str
 
     today_column_found = [c for c in all_date_columns if _is_today_column(c)]
     date_columns = [c for c in all_date_columns if not _is_today_column(c)]
