@@ -22,14 +22,13 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 REAL_URL = "https://openapi.koreainvestment.com:9443"
 
 HISTORY_FILE = "input/mydata.xlsx"
-RESULT_JSON = "../docs/data.json"
+RESULT_JSON = "../docs/screener_data.json"   # 기존 daily_update의 ../docs/data.json과 겹치지 않도록 파일명 분리
 
-# 토큰 캐시 파일 (workflow에서 실행 전/후로 암호화·복호화됨)
-# 스크립트가 daily_update/ 안에서 실행되므로 상대경로 그대로 사용
+# 토큰 캐시 파일 (stock_screener 폴더 내부에서 독립적으로 관리)
+# daily_update의 .token_state.json과는 완전히 별개 파일 (서로 영향 없음)
 TOKEN_STATE_FILE = ".token_state.json"
 
-# 만료 판단시 안전마진(분). KIS 발급 유효기간은 24시간이지만,
-# 실행 도중 만료되는 걸 막기 위해 여유를 두고 재발급 판단.
+# 만료 판단시 안전마진(분)
 TOKEN_SAFETY_MARGIN_MIN = 30
 
 # 순차 처리이므로 커넥션 풀은 1개면 충분
@@ -41,12 +40,8 @@ RATE_LIMIT_PER_SEC = 10
 # 관심종목(멀티종목) 시세조회 API는 1회 호출에 최대 30종목까지 지원
 BATCH_SIZE = 30
 
-# 거래량 평균을 신뢰하기 위해 필요한 최소 과거 데이터 일수
-# (이보다 적으면 avg_volume=0으로 처리하여 거래량 조건을 자동 통과시킴)
-MIN_VOLUME_HISTORY_DAYS = 3
-
-# 거래량 스파이크 판단 배율 (평균 거래량 대비 몇 배 이상이어야 통과인지)
-VOLUME_SPIKE_MULTIPLIER = 1.5
+# 20일 이동평균선 계산 기간 (거래일 기준)
+MA_PERIOD = 20
 
 # 디버그: 첫 배치에서 API 원본 응답 필드를 한 번 출력할지 여부
 DEBUG_PRINT_RAW_OUTPUT = False
@@ -99,7 +94,6 @@ def send_telegram(message):
 # ==================================
 
 def save_result_json(result):
-    # UTC 시각에 +9시간을 적용하여 KST(한국 표준시) 생성
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
 
@@ -167,8 +161,6 @@ def _issue_new_token():
 
     token = data["access_token"]
 
-    # KIS가 내려주는 만료시각(access_token_token_expired)이 있으면 활용하되,
-    # 없거나 형식이 다를 경우를 대비해 발급시각 + 23시간으로 안전하게 계산
     expire_at = datetime.now(timezone.utc) + timedelta(hours=23)
 
     with open(TOKEN_STATE_FILE, "w", encoding="utf-8") as f:
@@ -207,7 +199,7 @@ def chunk_list(items, size):
 
 
 # ==================================
-# 현재가 및 당일 누적 거래량 조회 (최대 30종목/1회)
+# 현재가 및 당일 시가/고가/저가 조회 (최대 30종목/1회)
 # ==================================
 
 def get_stock_price_batch(token, name_batch):
@@ -244,14 +236,12 @@ def get_stock_price_batch(token, name_batch):
 
             outputs = data["output"]
 
-            # ---- 디버그: 최초 1회만 원본 응답 필드 전체 출력 ----
             if DEBUG_PRINT_RAW_OUTPUT and not getattr(get_stock_price_batch, "_printed", False):
                 print("=" * 40)
                 print("DEBUG: API 원본 응답 (첫 종목 전체 필드)")
                 print(outputs[0])
                 print("=" * 40)
                 get_stock_price_batch._printed = True
-            # ------------------------------------------------
 
             results = []
 
@@ -261,7 +251,6 @@ def get_stock_price_batch(token, name_batch):
                 if name is None:
                     continue
 
-                # acml_vol : 당일 누적 거래량 (※ inter2_acml_vol은 실제 응답에 존재하지 않는 필드였음 - 디버그로 확인됨)
                 results.append({
                     "name": name,
                     "code": code,
@@ -269,7 +258,7 @@ def get_stock_price_batch(token, name_batch):
                     "high": float(output["inter2_hgpr"]),
                     "low": float(output["inter2_lwpr"]),
                     "current_price": float(output["inter2_prpr"]),
-                    "volume": float(output.get("acml_vol", 0))  # 오늘 누적 거래량 수집
+                    "volume": float(output.get("acml_vol", 0))
                 })
 
             return results
@@ -278,14 +267,69 @@ def get_stock_price_batch(token, name_batch):
             if retry < 2:
                 time.sleep(0.5 * (retry + 1))
             else:
-                # 토큰 자체가 만료/무효화되어 거부된 경우, 캐시를 삭제해서
-                # 다음 실행 때 재발급 로직이 확실히 새 토큰을 받도록 한다.
                 msg = str(e)
                 if "EGW00121" in msg or "기간이 만료" in msg or "인증" in msg:
                     if os.path.exists(TOKEN_STATE_FILE):
                         os.remove(TOKEN_STATE_FILE)
                         print("토큰 인증 오류 감지 → 캐시 파일 삭제(다음 실행 시 재발급)")
                 return [{"name": name, "error": str(e)} for name in name_batch]
+
+
+# ==================================
+# 과거 데이터에서 종가 시계열 추출 + 20일 이평선 추세 판단
+# 셀 형식: "고가_시가_저가_종가_거래량"
+# ==================================
+
+def parse_close_series(row, date_columns):
+    """오래된 -> 최신 순으로 정렬된 종가 리스트 반환"""
+    closes = []
+
+    for col in date_columns:
+        val = row[col]
+
+        if pd.isna(val):
+            continue
+
+        val = str(val)
+
+        if "_" not in val:
+            continue
+
+        parts = val.split("_")
+
+        if len(parts) != 5:
+            continue
+
+        try:
+            close = float(parts[3])  # 고가_시가_저가_종가_거래량 -> index 3
+            closes.append(close)
+        except ValueError:
+            continue
+
+    return closes
+
+
+def calc_ma_trend(closes):
+    """
+    20일 이동평균 추세 판단.
+    데이터가 부족하면 'insufficient', 아니면 'down' / 'up' / 'flat' 반환.
+    """
+    if len(closes) < MA_PERIOD + 1:
+        return "insufficient"
+
+    ma = pd.Series(closes).rolling(window=MA_PERIOD).mean()
+
+    ma_today = ma.iloc[-1]
+    ma_prev = ma.iloc[-2]
+
+    if pd.isna(ma_today) or pd.isna(ma_prev):
+        return "insufficient"
+
+    if ma_today < ma_prev:
+        return "down"
+    elif ma_today > ma_prev:
+        return "up"
+    return "flat"
 
 
 # ==================================
@@ -296,21 +340,19 @@ def main():
     start_time = time.time()
 
     print("=" * 40)
-    print("변동폭 돌파 검색 시작")
+    print("20일 이평선 하향 + 양봉 검색 시작")
     print("=" * 40)
 
     # -------------------------------
-    # 과거 데이터 및 전체 평균 거래량 계산
+    # 과거 데이터 로드
     # -------------------------------
     history = pd.read_excel(HISTORY_FILE)
 
     all_date_columns = [c for c in history.columns if c != "name"]
 
-    # 오늘 날짜(KST)에 해당하는 컬럼이 이미 들어가 있다면
-    # 과거 데이터 집계(max_history_range, avg_volume)에서는 제외한다.
-    # -> daily_add_price.py가 먼저 실행되어 오늘 컬럼이 채워진 뒤에 이 스크립트를
-    #    돌리더라도(장중/장마감 상관없이), 항상 "오늘 실시간 시세 vs 어제까지의
-    #    과거 데이터"로 비교되도록 보장한다.
+    # 오늘 날짜(KST) 컬럼이 이미 들어가 있다면 이평선 계산에서는 제외
+    # (daily_add_price.py가 먼저 실행되어 오늘 컬럼이 채워진 뒤에 이 스크립트를 돌리더라도
+    #  항상 "오늘 실시간 시세 vs 어제까지의 과거 데이터"로 비교되도록 보장)
     _kst = timezone(timedelta(hours=9))
     _today_kst = datetime.now(_kst).date()
 
@@ -318,7 +360,6 @@ def main():
         try:
             return pd.to_datetime(str(col)).date() == _today_kst
         except (ValueError, TypeError):
-            # 날짜로 파싱되지 않는 컬럼명이면 과거 데이터로 취급(제외하지 않음)
             return False
 
     today_column_found = [c for c in all_date_columns if _is_today_column(c)]
@@ -329,49 +370,38 @@ def main():
     else:
         print("오늘 날짜 컬럼 없음 → 전체 과거 데이터로 계산합니다.")
 
-    # 각 행(종목)별로 과거 최대 변동폭과 평균 거래량을 구하는 행 단위 처리 함수
-    def parse_history_row(row):
-        ranges = []
-        vols = []
-        for col in date_columns:
-            val = str(row[col])
-            if val and val != "nan" and "_" in val:
-                # "2500_1523000" (변동폭_거래량) 형태
-                r, v = val.split("_")
-                ranges.append(float(r))
-                vols.append(float(v))
-            elif val and val != "nan":
-                # 기존 데이터(거래량 없이 숫자만 있던 과거 데이터 예외 처리)
-                ranges.append(float(val))
+    # -------------------------------
+    # 종목별 20일 이평선 추세 계산
+    # -------------------------------
+    trends = []
+    for _, row in history.iterrows():
+        closes = parse_close_series(row, date_columns)
+        trend = calc_ma_trend(closes)
+        trends.append(trend)
 
-        max_range = max(ranges) if ranges else 0.0
+    history["ma_trend"] = trends
 
-        # 거래량 데이터가 MIN_VOLUME_HISTORY_DAYS일 미만으로 쌓여 있으면
-        # 아직 "평균"으로서 의미가 없다고 보고 avg_volume=0 (조건 자동 통과) 처리
-        if len(vols) >= MIN_VOLUME_HISTORY_DAYS:
-            avg_vol = sum(vols) / len(vols)
-        else:
-            avg_vol = 0.0
+    down_trend_stocks = history[history["ma_trend"] == "down"]
+    print(f"20일 이평선 하향 종목 수 : {len(down_trend_stocks)}")
 
-        return pd.Series([max_range, avg_vol], index=["max_history_range", "avg_volume"])
+    if down_trend_stocks.empty:
+        print("이평선 하향 조건을 만족하는 종목이 없습니다.")
+        save_result_json(down_trend_stocks)
+        send_telegram("📉 오늘 조건 만족 종목 없음 (이평선 하향 종목 자체가 없음)")
+        return
 
-    # 행 단위 파싱 실행
-    parsed_df = history.apply(parse_history_row, axis=1)
-    history["max_history_range"] = parsed_df["max_history_range"]
-    history["avg_volume"] = parsed_df["avg_volume"]
-
+    # -------------------------------
+    # 이평선 하향 종목만 대상으로 오늘 실시간 시세 조회 (API 호출 최소화)
+    # -------------------------------
     token = get_access_token()
-    stock_names = history["name"].tolist()
+    stock_names = down_trend_stocks["name"].tolist()
     total = len(stock_names)
-    print(f"총 {total}개 종목 조회 예정")
+    print(f"실시간 조회 대상 : {total}개 종목")
 
     batches = list(chunk_list(stock_names, BATCH_SIZE))
     total_batches = len(batches)
     print(f"{BATCH_SIZE}종목씩 {total_batches}개 배치로 조회")
 
-    # -------------------------------
-    # 배치 순차 조회
-    # -------------------------------
     results = []
     errors = []
     success = 0
@@ -390,47 +420,20 @@ def main():
 
         print(f"[배치 {idx}/{total_batches}] 조회 완료 (누적 성공:{success}, 실패:{fail})")
 
-    # -------------------------------
-    # 조건 비교 (변동폭 돌파 & 양봉 & 윗꼬리 10% 미만 & 거래량 1.5배 이상)
-    # -------------------------------
     today = pd.DataFrame(results)
 
     if today.empty:
         print("조회된 당일 시세 데이터가 없습니다.")
-        send_telegram("📊 오늘 조건 만족 변동폭 돌파 종목 없음 (시세 조회 데이터 없음)")
+        save_result_json(today)
+        send_telegram("📉 오늘 조건 만족 종목 없음 (시세 조회 데이터 없음)")
         return
 
-    merged = today.merge(
-        history[["name", "max_history_range", "avg_volume"]],
-        on="name",
-        how="inner"
-    )
+    # -------------------------------
+    # 양봉 판단 (현재가 > 시가)
+    # -------------------------------
+    today["bullish"] = today["current_price"] > today["open"]
 
-    # 당일 변동폭 계산
-    merged["today_range"] = merged["high"] - merged["low"]
-
-    # 0으로 나누기(DivByZero) 방지 처리
-    safe_range = merged["today_range"].replace(0, float('nan'))
-    merged["upper_shadow_ratio"] = (merged["high"] - merged["current_price"]) / safe_range
-
-    # 양봉 판단
-    merged["bullish"] = merged["current_price"] > merged["open"]
-
-    # 거래량 조건 판단 (과거 거래량 데이터가 충분히 쌓이지 않은 경우는 조건 pass)
-    def check_volume_spike(row):
-        if row["avg_volume"] <= 0:
-            return True  # 과거 거래량 데이터가 없거나 부족하면 분출 여부 판단을 건너뛰고 조건 통과
-        return row["volume"] >= (row["avg_volume"] * VOLUME_SPIKE_MULTIPLIER)
-
-    merged["volume_spike"] = merged.apply(check_volume_spike, axis=1)
-
-    # 최종 스크리닝
-    result = merged[
-        (merged["today_range"] > merged["max_history_range"])  # 과거 최대 변동폭 돌파
-        & (merged["bullish"])                                  # 양봉
-        & (merged["upper_shadow_ratio"] < 0.1)                 # 윗꼬리 10% 미만
-        & (merged["volume_spike"])                             # 과거 평균 대비 1.5배 이상 거래량 (또는 데이터 부족 시 통과)
-    ]
+    result = today[today["bullish"]]
 
     save_result_json(result)
 
@@ -438,12 +441,12 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        message = f"📈 변동폭 돌파 종목 (거래량 {VOLUME_SPIKE_MULTIPLIER}배 분출)\n\n"
-        for name in result["name"]:
-            print("★", name)
-            message += f"★ {name}\n"
+        message = "📉📈 20일 이평선 하향 + 오늘 양봉 종목\n\n"
+        for _, r in result.iterrows():
+            print("★", r["name"])
+            message += f"★ {r['name']} (시가 {r['open']:.0f} → 현재가 {r['current_price']:.0f})\n"
     else:
-        message = "📊 오늘 조건 만족 변동폭 돌파 종목 없음"
+        message = "📉 오늘 조건 만족 종목 없음 (이평선 하향은 있으나 양봉 아님)"
 
     send_telegram(message)
     print("텔레그램 전송 완료")
@@ -464,16 +467,9 @@ def main():
         for key, count in sorted(error_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
             print(f"  [{count}건] {key}")
 
-    print(f"돌파 종목 : {len(result)}")
+    print(f"최종 추출 종목 : {len(result)}")
     print(f"실행 시간 : {elapsed:.1f}초")
     print("=" * 40)
-
-    print("변동폭 돌파:", (merged["today_range"] > merged["max_history_range"]).sum())
-    print("양봉:", merged["bullish"].sum())
-    print("윗꼬리 10% 미만:", (merged["upper_shadow_ratio"] < 0.1).sum())
-    print("거래량 스파이크:", merged["volume_spike"].sum())
-    print("전체 종목 수:", len(merged))
-    print(merged[["name", "open", "high", "low", "current_price", "today_range", "max_history_range"]].head(10))
 
 
 if __name__ == "__main__":
