@@ -43,6 +43,15 @@ BATCH_SIZE = 30
 # 이동평균선 계산 기간 (거래일 기준)
 MA_PERIOD = 5
 
+# 이평선 하향 추세 판단 기준: 오늘 MA5 값을 며칠 전 MA5 값과 비교할지 (거래일 기준)
+TREND_LOOKBACK_DAYS = 30
+
+# 캔들 몸통 평균 계산 기간 (거래일 기준)
+BODY_LOOKBACK_DAYS = 30
+
+# 몸통 평균 계산에 필요한 최소 과거 데이터 일수 (이보다 적으면 판단 불가로 제외)
+MIN_BODY_HISTORY_DAYS = 5
+
 # 디버그: 첫 배치에서 API 원본 응답 필드를 한 번 출력할지 여부
 DEBUG_PRINT_RAW_OUTPUT = False
 
@@ -309,27 +318,72 @@ def parse_close_series(row, date_columns):
     return closes
 
 
+def parse_body_series(row, date_columns):
+    """오래된 -> 최신 순으로 정렬된 캔들 몸통 크기(|종가-시가|) 리스트 반환"""
+    bodies = []
+
+    for col in date_columns:
+        val = row[col]
+
+        if pd.isna(val):
+            continue
+
+        val = str(val)
+
+        if "_" not in val:
+            continue
+
+        parts = val.split("_")
+
+        if len(parts) != 5:
+            continue
+
+        try:
+            open_ = float(parts[1])  # 고가_시가_저가_종가_거래량 -> index 1
+            close = float(parts[3])  # index 3
+            bodies.append(abs(close - open_))
+        except ValueError:
+            continue
+
+    return bodies
+
+
 def calc_ma_trend(closes):
     """
-    5일 이동평균 추세 판단.
+    5일 이동평균이 TREND_LOOKBACK_DAYS(기본 30)거래일 전보다 낮은지로 하향 추세 판단.
     데이터가 부족하면 'insufficient', 아니면 'down' / 'up' / 'flat' 반환.
     """
-    if len(closes) < MA_PERIOD + 1:
+    required_len = MA_PERIOD + TREND_LOOKBACK_DAYS
+
+    if len(closes) < required_len:
         return "insufficient"
 
     ma = pd.Series(closes).rolling(window=MA_PERIOD).mean()
 
     ma_today = ma.iloc[-1]
-    ma_prev = ma.iloc[-2]
+    ma_past = ma.iloc[-1 - TREND_LOOKBACK_DAYS]  # TREND_LOOKBACK_DAYS 거래일 전의 MA5 값
 
-    if pd.isna(ma_today) or pd.isna(ma_prev):
+    if pd.isna(ma_today) or pd.isna(ma_past):
         return "insufficient"
 
-    if ma_today < ma_prev:
+    if ma_today < ma_past:
         return "down"
-    elif ma_today > ma_prev:
+    elif ma_today > ma_past:
         return "up"
     return "flat"
+
+
+def calc_avg_body(bodies, lookback=BODY_LOOKBACK_DAYS):
+    """
+    최근 lookback(기본 30)거래일의 평균 캔들 몸통 크기 계산.
+    데이터가 MIN_BODY_HISTORY_DAYS보다 적으면 None 반환(판단 불가).
+    """
+    recent = bodies[-lookback:] if len(bodies) >= lookback else bodies
+
+    if len(recent) < MIN_BODY_HISTORY_DAYS:
+        return None
+
+    return sum(recent) / len(recent)
 
 
 # ==================================
@@ -340,7 +394,7 @@ def main():
     start_time = time.time()
 
     print("=" * 40)
-    print("5일 이평선 하향 + 양봉 검색 시작")
+    print("5일선 하향(30일) + 양봉 + 몸통 확대 검색 시작")
     print("=" * 40)
 
     # -------------------------------
@@ -371,18 +425,27 @@ def main():
         print("오늘 날짜 컬럼 없음 → 전체 과거 데이터로 계산합니다.")
 
     # -------------------------------
-    # 종목별 5일 이평선 추세 계산
+    # 종목별 5일 이평선 추세(30거래일 전 대비) + 30거래일 평균 캔들 몸통 계산
     # -------------------------------
     trends = []
+    avg_bodies = []
     for _, row in history.iterrows():
         closes = parse_close_series(row, date_columns)
         trend = calc_ma_trend(closes)
         trends.append(trend)
 
-    history["ma_trend"] = trends
+        bodies = parse_body_series(row, date_columns)
+        avg_body = calc_avg_body(bodies)
+        avg_bodies.append(avg_body)
 
-    down_trend_stocks = history[history["ma_trend"] == "down"]
-    print(f"5일 이평선 하향 종목 수 : {len(down_trend_stocks)}")
+    history["ma_trend"] = trends
+    history["avg_body"] = avg_bodies
+
+    # 이평선 하향 + 평균 몸통 계산 가능(데이터 충분)한 종목만 1차 후보로 선정
+    down_trend_stocks = history[
+        (history["ma_trend"] == "down") & (history["avg_body"].notna())
+    ]
+    print(f"5일 이평선 하향(30거래일 기준) 종목 수 : {len(down_trend_stocks)}")
 
     if down_trend_stocks.empty:
         print("이평선 하향 조건을 만족하는 종목이 없습니다.")
@@ -395,6 +458,7 @@ def main():
     # -------------------------------
     token = get_access_token()
     stock_names = down_trend_stocks["name"].tolist()
+    avg_body_lookup = dict(zip(down_trend_stocks["name"], down_trend_stocks["avg_body"]))
     total = len(stock_names)
     print(f"실시간 조회 대상 : {total}개 종목")
 
@@ -429,11 +493,14 @@ def main():
         return
 
     # -------------------------------
-    # 양봉 판단 (현재가 > 시가)
+    # 양봉 판단 (현재가 > 시가) + 오늘 몸통 크기가 30거래일 평균 몸통보다 큰지 판단
     # -------------------------------
     today["bullish"] = today["current_price"] > today["open"]
+    today["today_body"] = (today["current_price"] - today["open"]).abs()
+    today["avg_body"] = today["name"].map(avg_body_lookup)
+    today["body_bigger"] = today["today_body"] > today["avg_body"]
 
-    result = today[today["bullish"]]
+    result = today[today["bullish"] & today["body_bigger"]]
 
     save_result_json(result)
 
@@ -441,12 +508,16 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        message = "📉📈 5일 이평선 하향 + 오늘 양봉 종목\n\n"
+        message = "📉📈 5일선 하향(30일) + 양봉 + 몸통 확대 종목\n\n"
         for _, r in result.iterrows():
             print("★", r["name"])
-            message += f"★ {r['name']} (시가 {r['open']:.0f} → 현재가 {r['current_price']:.0f})\n"
+            message += (
+                f"★ {r['name']} "
+                f"(시가 {r['open']:.0f} → 현재가 {r['current_price']:.0f}, "
+                f"오늘 몸통 {r['today_body']:.0f} / 평균 몸통 {r['avg_body']:.0f})\n"
+            )
     else:
-        message = "📉 오늘 조건 만족 종목 없음 (이평선 하향은 있으나 양봉 아님)"
+        message = "📉 오늘 조건 만족 종목 없음 (이평선 하향은 있으나 양봉+몸통 확대 조건 미충족)"
 
     send_telegram(message)
     print("텔레그램 전송 완료")
