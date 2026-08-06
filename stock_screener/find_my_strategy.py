@@ -40,8 +40,8 @@ RATE_LIMIT_PER_SEC = 10
 # 관심종목(멀티종목) 시세조회 API는 1회 호출에 최대 30종목까지 지원
 BATCH_SIZE = 30
 
-# 20일 이동평균선 계산 기간 (거래일 기준)
-MA_PERIOD = 20
+# 이동평균선 계산 기간 (거래일 기준)
+MA_PERIOD = 5
 
 # 디버그: 첫 배치에서 API 원본 응답 필드를 한 번 출력할지 여부
 DEBUG_PRINT_RAW_OUTPUT = False
@@ -276,7 +276,7 @@ def get_stock_price_batch(token, name_batch):
 
 
 # ==================================
-# 과거 데이터에서 종가 시계열 추출 + 20일 이평선 추세 판단
+# 과거 데이터에서 종가 시계열 추출 + 5일 이평선 추세 판단
 # 셀 형식: "고가_시가_저가_종가_거래량"
 # ==================================
 
@@ -311,7 +311,7 @@ def parse_close_series(row, date_columns):
 
 def calc_ma_trend(closes):
     """
-    20일 이동평균 추세 판단.
+    5일 이동평균 추세 판단.
     데이터가 부족하면 'insufficient', 아니면 'down' / 'up' / 'flat' 반환.
     """
     if len(closes) < MA_PERIOD + 1:
@@ -340,7 +340,7 @@ def main():
     start_time = time.time()
 
     print("=" * 40)
-    print("20일 이평선 하향 + 양봉 검색 시작")
+    print("5일 이평선 하향 + 양봉 검색 시작")
     print("=" * 40)
 
     # -------------------------------
@@ -371,7 +371,7 @@ def main():
         print("오늘 날짜 컬럼 없음 → 전체 과거 데이터로 계산합니다.")
 
     # -------------------------------
-    # 종목별 20일 이평선 추세 계산
+    # 종목별 5일 이평선 추세 계산
     # -------------------------------
     trends = []
     for _, row in history.iterrows():
@@ -382,7 +382,7 @@ def main():
     history["ma_trend"] = trends
 
     down_trend_stocks = history[history["ma_trend"] == "down"]
-    print(f"20일 이평선 하향 종목 수 : {len(down_trend_stocks)}")
+    print(f"5일 이평선 하향 종목 수 : {len(down_trend_stocks)}")
 
     if down_trend_stocks.empty:
         print("이평선 하향 조건을 만족하는 종목이 없습니다.")
@@ -441,7 +441,7 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        message = "📉📈 20일 이평선 하향 + 오늘 양봉 종목\n\n"
+        message = "📉📈 5일 이평선 하향 + 오늘 양봉 종목\n\n"
         for _, r in result.iterrows():
             print("★", r["name"])
             message += f"★ {r['name']} (시가 {r['open']:.0f} → 현재가 {r['current_price']:.0f})\n"
