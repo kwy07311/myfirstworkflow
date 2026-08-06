@@ -53,7 +53,7 @@ BODY_LOOKBACK_DAYS = 30
 MIN_BODY_HISTORY_DAYS = 5
 
 # 디버그: 첫 배치에서 API 원본 응답 필드를 한 번 출력할지 여부
-DEBUG_PRINT_RAW_OUTPUT = true
+DEBUG_PRINT_RAW_OUTPUT = True
 
 
 # ==================================
