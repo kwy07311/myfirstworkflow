@@ -3,7 +3,7 @@ from pykrx_range import get_range_data
 from logger import log
 
 STOCK_FILE = "input/mydata.xlsx"
-MAX_DATE_COLUMNS = 10
+MAX_DATE_COLUMNS = 60   # 기존 daily_update는 10일치, stock_screener는 20일 이평선 계산을 위해 60일치 보관
 
 
 def extract_code(value):
@@ -51,7 +51,7 @@ def update_excel(target_date=None):
     ]
 
 
-    # 최근 10개만 유지
+    # 최근 60개(MAX_DATE_COLUMNS)만 유지
     if len(date_columns) > MAX_DATE_COLUMNS:
 
         columns_to_drop = date_columns[
