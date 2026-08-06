@@ -1,4 +1,4 @@
-name: 5일선 돌파 데이터 업데이트
+name: 5일선 돌파 업데이트
 
 on:
   workflow_dispatch:
