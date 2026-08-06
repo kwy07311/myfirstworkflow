@@ -53,7 +53,7 @@ BODY_LOOKBACK_DAYS = 30
 MIN_BODY_HISTORY_DAYS = 5
 
 # 디버그: 첫 배치에서 API 원본 응답 필드를 한 번 출력할지 여부
-DEBUG_PRINT_RAW_OUTPUT = True
+DEBUG_PRINT_RAW_OUTPUT = False
 
 
 # ==================================
@@ -542,6 +542,11 @@ def main():
 
     if today.empty:
         print("조회된 당일 시세 데이터가 없습니다.")
+        print(f"조회 성공 : {success} / 조회 실패 : {fail}")
+        if errors:
+            print("-- 실패 상세 내역 --")
+            for err in errors:
+                print(" -", err)
         save_result_json(today)
         send_telegram("📉 오늘 조건 만족 종목 없음 (시세 조회 데이터 없음)")
         return
