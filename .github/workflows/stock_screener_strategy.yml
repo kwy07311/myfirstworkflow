@@ -1,4 +1,4 @@
-name: Stock Screener - MA Reversal Scan
+name: Stock Screener - 5일선 반환
 
 on:
   workflow_dispatch:
