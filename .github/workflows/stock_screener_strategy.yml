@@ -1,4 +1,4 @@
-name: Stock Screener - MA Reversal Scan
+name: 5일선 돌파
 
 on:
   workflow_dispatch:
