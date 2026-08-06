@@ -44,7 +44,7 @@ BATCH_SIZE = 30
 MA_PERIOD = 5
 
 # 이평선 하향 추세 판단 기준: 오늘 MA5 값을 며칠 전 MA5 값과 비교할지 (거래일 기준)
-TREND_LOOKBACK_DAYS = 30
+TREND_LOOKBACK_DAYS = 10
 
 # 캔들 몸통 평균 계산 기간 (거래일 기준)
 BODY_LOOKBACK_DAYS = 30
@@ -380,7 +380,7 @@ def calc_ma_trend(closes):
     """
     최근 TREND_LOOKBACK_DAYS(기본 30)거래일 동안의 5일 이동평균선이
     하루도 빠짐없이 계속 하락(단조 감소)하는 경우에만 'down'으로 판단.
-    30거래일 구간 중 단 하루라도 MA5가 오르거나 유지되면 하향 추세로 인정하지 않음.
+    10거래일 구간 중 단 하루라도 MA5가 오르거나 유지되면 하향 추세로 인정하지 않음.
 
     closes 리스트는 "오늘"을 제외한 어제까지의 종가(오래된 -> 최신 순)라고 가정.
 
@@ -431,7 +431,7 @@ def main():
     start_time = time.time()
 
     print("=" * 40)
-    print("5일선 하향(30일) + 양봉 + 몸통 확대 검색 시작")
+    print("5일선 하향(10일) + 양봉 + 몸통 확대 검색 시작")
     print("=" * 40)
 
     # -------------------------------
@@ -479,7 +479,7 @@ def main():
         print("오늘 날짜 컬럼 없음 → 전체 과거 데이터로 계산합니다.")
 
     # -------------------------------
-    # 종목별 5일 이평선 추세(30거래일 회귀+최근반등체크) + 30거래일 평균 캔들 몸통 계산
+    # 종목별 5일 이평선 추세(10거래일 단조하락) + 30거래일 평균 캔들 몸통 계산
     # -------------------------------
     trends = []
     avg_bodies = []
@@ -499,7 +499,7 @@ def main():
     down_trend_stocks = history[
         (history["ma_trend"] == "down") & (history["avg_body"].notna())
     ]
-    print(f"5일 이평선 하향(30거래일 기준) 종목 수 : {len(down_trend_stocks)}")
+    print(f"5일 이평선 하향(10거래일 기준) 종목 수 : {len(down_trend_stocks)}")
 
     if down_trend_stocks.empty:
         print("이평선 하향 조건을 만족하는 종목이 없습니다.")
@@ -589,7 +589,7 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        header = f"📉📈 5일선 하향(30일) + 양봉 + 몸통 확대 종목 (총 {len(result)}개)"
+        header = f"📉📈 5일선 하향(10일) + 양봉 + 몸통 확대 종목 (총 {len(result)}개)"
         lines = []
         for _, r in result.iterrows():
             print("★", r["name"])
