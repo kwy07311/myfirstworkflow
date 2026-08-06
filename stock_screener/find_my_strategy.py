@@ -4,7 +4,6 @@ import time
 import threading
 import requests
 import pandas as pd
-import numpy as np
 
 from datetime import datetime, timezone, timedelta
 from requests.adapters import HTTPAdapter
@@ -47,10 +46,6 @@ MA_PERIOD = 5
 # 이평선 하향 추세 판단 기준: 오늘 MA5 값을 며칠 전 MA5 값과 비교할지 (거래일 기준)
 TREND_LOOKBACK_DAYS = 30
 
-# 30일 전체 기울기는 하향이어도, 최근 이 기간(거래일) 안에 MA5가 다시 상승 전환했으면
-# "하향 추세"로 인정하지 않음 (과거의 큰 하락이 최근 반등을 가리는 것 방지)
-RECENT_CONFIRM_DAYS = 5
-
 # 캔들 몸통 평균 계산 기간 (거래일 기준)
 BODY_LOOKBACK_DAYS = 30
 
@@ -58,7 +53,7 @@ BODY_LOOKBACK_DAYS = 30
 MIN_BODY_HISTORY_DAYS = 5
 
 # 디버그: 첫 배치에서 API 원본 응답 필드를 한 번 출력할지 여부
-DEBUG_PRINT_RAW_OUTPUT = False
+DEBUG_PRINT_RAW_OUTPUT = true
 
 
 # ==================================
@@ -383,17 +378,13 @@ def parse_body_series(row, date_columns):
 
 def calc_ma_trend(closes):
     """
-    최근 TREND_LOOKBACK_DAYS(기본 30)거래일 동안의 5일 이동평균선을
-    선형회귀로 추세선을 그어 그 기울기(slope)로 하향/상향 판단.
-    (개별 날짜의 양봉/음봉 여부는 무관 - MA5 라인 자체의 전반적인 방향만 본다)
-
-    단, 전체 기울기가 하향이어도 최근 RECENT_CONFIRM_DAYS 거래일 안에
-    MA5가 다시 상승 전환했다면 'down'으로 인정하지 않는다.
-    (예: 과거에 크게 떨어졌다가 최근 반등 중인 종목이 잘못 잡히는 것 방지)
+    최근 TREND_LOOKBACK_DAYS(기본 30)거래일 동안의 5일 이동평균선이
+    하루도 빠짐없이 계속 하락(단조 감소)하는 경우에만 'down'으로 판단.
+    30거래일 구간 중 단 하루라도 MA5가 오르거나 유지되면 하향 추세로 인정하지 않음.
 
     closes 리스트는 "오늘"을 제외한 어제까지의 종가(오래된 -> 최신 순)라고 가정.
 
-    데이터가 부족하면 'insufficient', 아니면 'down' / 'up' / 'flat' / 'reversed_up' 반환.
+    데이터가 부족하면 'insufficient', 아니면 'down' / 'not_down' 반환.
     """
     # TREND_LOOKBACK_DAYS개의 "유효한" MA5 값을 얻으려면
     # 최소 MA_PERIOD + TREND_LOOKBACK_DAYS - 1개의 종가가 필요
@@ -407,23 +398,16 @@ def calc_ma_trend(closes):
     if len(ma) < TREND_LOOKBACK_DAYS:
         return "insufficient"
 
-    # 1) 최근 TREND_LOOKBACK_DAYS개의 MA5 값(어제까지)로 전체 추세선 기울기 계산
-    ma_window = ma.iloc[-TREND_LOOKBACK_DAYS:].values
-    x = np.arange(len(ma_window))
+    # 최근 TREND_LOOKBACK_DAYS개의 MA5 값(어제까지)
+    ma_window = ma.iloc[-TREND_LOOKBACK_DAYS:]
 
-    slope, _ = np.polyfit(x, ma_window, 1)
+    # 하루 전 대비 매일의 증감(diff) 계산 -> 전부 음수(하락)여야 '단조 하락'
+    diffs = ma_window.diff().dropna()
 
-    if slope >= 0:
-        return "up" if slope > 0 else "flat"
+    if (diffs < 0).all():
+        return "down"
 
-    # 2) 전체 기울기는 하향이지만, 최근 며칠 사이 MA5가 다시 상승 전환했는지 확인
-    recent_ma = ma.iloc[-RECENT_CONFIRM_DAYS:]
-    recent_diffs = recent_ma.diff().dropna()
-
-    if (recent_diffs > 0).any():
-        return "reversed_up"
-
-    return "down"
+    return "not_down"
 
 
 def calc_avg_body(bodies, lookback=BODY_LOOKBACK_DAYS):
@@ -560,6 +544,28 @@ def main():
         print("조회된 당일 시세 데이터가 없습니다.")
         save_result_json(today)
         send_telegram("📉 오늘 조건 만족 종목 없음 (시세 조회 데이터 없음)")
+        return
+
+    # -------------------------------
+    # 거래정지 등 이상 데이터 제외
+    # (거래정지/미거래 종목은 보통 가격이 0으로 오거나, 당일 거래량이 0으로 옴)
+    # -------------------------------
+    before_count = len(today)
+    today = today[
+        (today["open"] > 0)
+        & (today["high"] > 0)
+        & (today["low"] > 0)
+        & (today["current_price"] > 0)
+        & (today["volume"] > 0)
+    ]
+    excluded_count = before_count - len(today)
+    if excluded_count > 0:
+        print(f"거래정지/이상치 의심으로 제외된 종목 수 : {excluded_count}")
+
+    if today.empty:
+        print("거래정지 등 이상치 제외 후 남은 종목이 없습니다.")
+        save_result_json(today)
+        send_telegram("📉 오늘 조건 만족 종목 없음 (거래정지 등 제외 후 없음)")
         return
 
     # -------------------------------
