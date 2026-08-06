@@ -21,7 +21,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 REAL_URL = "https://openapi.koreainvestment.com:9443"
 
-HISTORY_FILE = "input/mydata.xlsx"
+HISTORY_FILE = "input/mydata2.xlsx"
 RESULT_JSON = "../docs/screener_data.json"   # 기존 daily_update의 ../docs/data.json과 겹치지 않도록 파일명 분리
 
 # 토큰 캐시 파일 (stock_screener 폴더 내부에서 독립적으로 관리)
