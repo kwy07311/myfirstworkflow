@@ -98,6 +98,34 @@ def send_telegram(message):
     response.raise_for_status()
 
 
+def send_telegram_long(header, lines, chunk_char_limit=3500):
+    """
+    텔레그램 메시지 4096자 제한 대응.
+    header + lines를 chunk_char_limit 기준으로 여러 메시지로 쪼개서 순차 전송.
+    """
+    if not lines:
+        send_telegram(header)
+        return
+
+    chunks = []
+    current = header + "\n\n"
+
+    for line in lines:
+        if len(current) + len(line) > chunk_char_limit:
+            chunks.append(current)
+            current = ""
+        current += line
+
+    if current:
+        chunks.append(current)
+
+    total = len(chunks)
+    for idx, chunk in enumerate(chunks, start=1):
+        prefix = f"[{idx}/{total}]\n" if total > 1 else ""
+        send_telegram(prefix + chunk)
+        time.sleep(0.5)  # 텔레그램 API 연속 호출 방지용 짧은 대기
+
+
 # ==================================
 # 결과 JSON 저장 (웹페이지에서 사용)
 # ==================================
@@ -373,9 +401,9 @@ def calc_ma_trend(closes):
     return "flat"
 
 
-def calc_avg_body(bodies, lookback=BODY_LOOKBACK_DAYS):
+def calc_max_body(bodies, lookback=BODY_LOOKBACK_DAYS):
     """
-    최근 lookback(기본 30)거래일의 평균 캔들 몸통 크기 계산.
+    최근 lookback(기본 30)거래일 중 가장 큰 캔들 몸통 크기 반환.
     데이터가 MIN_BODY_HISTORY_DAYS보다 적으면 None 반환(판단 불가).
     """
     recent = bodies[-lookback:] if len(bodies) >= lookback else bodies
@@ -383,7 +411,7 @@ def calc_avg_body(bodies, lookback=BODY_LOOKBACK_DAYS):
     if len(recent) < MIN_BODY_HISTORY_DAYS:
         return None
 
-    return sum(recent) / len(recent)
+    return max(recent)
 
 
 # ==================================
@@ -425,25 +453,25 @@ def main():
         print("오늘 날짜 컬럼 없음 → 전체 과거 데이터로 계산합니다.")
 
     # -------------------------------
-    # 종목별 5일 이평선 추세(30거래일 전 대비) + 30거래일 평균 캔들 몸통 계산
+    # 종목별 5일 이평선 추세(30거래일 전 대비) + 30거래일 최대 캔들 몸통 계산
     # -------------------------------
     trends = []
-    avg_bodies = []
+    max_bodies = []
     for _, row in history.iterrows():
         closes = parse_close_series(row, date_columns)
         trend = calc_ma_trend(closes)
         trends.append(trend)
 
         bodies = parse_body_series(row, date_columns)
-        avg_body = calc_avg_body(bodies)
-        avg_bodies.append(avg_body)
+        max_body = calc_max_body(bodies)
+        max_bodies.append(max_body)
 
     history["ma_trend"] = trends
-    history["avg_body"] = avg_bodies
+    history["max_body"] = max_bodies
 
-    # 이평선 하향 + 평균 몸통 계산 가능(데이터 충분)한 종목만 1차 후보로 선정
+    # 이평선 하향 + 최대 몸통 계산 가능(데이터 충분)한 종목만 1차 후보로 선정
     down_trend_stocks = history[
-        (history["ma_trend"] == "down") & (history["avg_body"].notna())
+        (history["ma_trend"] == "down") & (history["max_body"].notna())
     ]
     print(f"5일 이평선 하향(30거래일 기준) 종목 수 : {len(down_trend_stocks)}")
 
@@ -458,7 +486,7 @@ def main():
     # -------------------------------
     token = get_access_token()
     stock_names = down_trend_stocks["name"].tolist()
-    avg_body_lookup = dict(zip(down_trend_stocks["name"], down_trend_stocks["avg_body"]))
+    max_body_lookup = dict(zip(down_trend_stocks["name"], down_trend_stocks["max_body"]))
     total = len(stock_names)
     print(f"실시간 조회 대상 : {total}개 종목")
 
@@ -493,12 +521,12 @@ def main():
         return
 
     # -------------------------------
-    # 양봉 판단 (현재가 > 시가) + 오늘 몸통 크기가 30거래일 평균 몸통보다 큰지 판단
+    # 양봉 판단 (현재가 > 시가) + 오늘 몸통 크기가 30거래일 중 최대 몸통보다 큰지 판단
     # -------------------------------
     today["bullish"] = today["current_price"] > today["open"]
     today["today_body"] = (today["current_price"] - today["open"]).abs()
-    today["avg_body"] = today["name"].map(avg_body_lookup)
-    today["body_bigger"] = today["today_body"] > today["avg_body"]
+    today["max_body"] = today["name"].map(max_body_lookup)
+    today["body_bigger"] = today["today_body"] > today["max_body"]
 
     result = today[today["bullish"] & today["body_bigger"]]
 
@@ -508,18 +536,19 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        message = "📉📈 5일선 하향(30일) + 양봉 + 몸통 확대 종목\n\n"
+        header = f"📉📈 5일선 하향(30일) + 양봉 + 30일 내 최대 몸통 갱신 종목 (총 {len(result)}개)"
+        lines = []
         for _, r in result.iterrows():
             print("★", r["name"])
-            message += (
+            lines.append(
                 f"★ {r['name']} "
                 f"(시가 {r['open']:.0f} → 현재가 {r['current_price']:.0f}, "
-                f"오늘 몸통 {r['today_body']:.0f} / 평균 몸통 {r['avg_body']:.0f})\n"
+                f"오늘 몸통 {r['today_body']:.0f} / 30일 내 최대 몸통 {r['max_body']:.0f})\n"
             )
+        send_telegram_long(header, lines)
     else:
-        message = "📉 오늘 조건 만족 종목 없음 (이평선 하향은 있으나 양봉+몸통 확대 조건 미충족)"
+        send_telegram("📉 오늘 조건 만족 종목 없음 (이평선 하향은 있으나 양봉+몸통 갱신 조건 미충족)")
 
-    send_telegram(message)
     print("텔레그램 전송 완료")
 
     elapsed = time.time() - start_time
