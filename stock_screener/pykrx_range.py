@@ -29,6 +29,13 @@ def get_trade_date(target_date=None):
 
 
 def get_range_data(codes, target_date=None):
+    """
+    전 종목의 고가/시가/저가/종가/거래량을 조회해서
+    {code: "고가_시가_저가_종가_거래량"} 형태로 반환.
+    (기존 daily_update의 get_range_data는 '가격범위_거래량' 2개 값만 저장했지만,
+     stock_screener는 20일 이평선 계산을 위해 종가가 필요하고,
+     find_my_strategy.py에서 시가/고가/저가도 함께 참고할 수 있도록 5개 값 전체를 저장)
+    """
 
     date = get_trade_date(target_date)
 
@@ -82,18 +89,15 @@ def get_range_data(codes, target_date=None):
 
             row = df_all.loc[code]
 
-
-            price_range = int(
-                row["고가"] - row["저가"]
-            )
-
-            volume = int(
-                row["거래량"]
-            )
+            high = int(row["고가"])
+            open_ = int(row["시가"])
+            low = int(row["저가"])
+            close = int(row["종가"])
+            volume = int(row["거래량"])
 
 
             result[code] = (
-                f"{price_range}_{volume}"
+                f"{high}_{open_}_{low}_{close}_{volume}"
             )
 
 
