@@ -1,4 +1,4 @@
-name: Stock Screener - Update Excel
+name: 60일치 종목 업데이트
 
 on:
   workflow_dispatch:
