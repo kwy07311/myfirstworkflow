@@ -4,6 +4,7 @@ import time
 import threading
 import requests
 import pandas as pd
+import numpy as np
 
 from datetime import datetime, timezone, timedelta
 from requests.adapters import HTTPAdapter
@@ -378,25 +379,37 @@ def parse_body_series(row, date_columns):
 
 def calc_ma_trend(closes):
     """
-    5일 이동평균이 TREND_LOOKBACK_DAYS(기본 30)거래일 전보다 낮은지로 하향 추세 판단.
+    최근 TREND_LOOKBACK_DAYS(기본 30)거래일 동안의 5일 이동평균선을
+    선형회귀로 추세선을 그어 그 기울기(slope)로 하향/상향 판단.
+    (개별 날짜의 양봉/음봉 여부는 무관 - MA5 라인 자체의 전반적인 방향만 본다)
+
+    closes 리스트는 "오늘"을 제외한 어제까지의 종가(오래된 -> 최신 순)라고 가정.
+    즉 이동평균선의 마지막 지점은 "어제"의 MA5 값이고,
+    그 지점으로부터 TREND_LOOKBACK_DAYS거래일 전까지의 구간 기울기를 본다.
+
     데이터가 부족하면 'insufficient', 아니면 'down' / 'up' / 'flat' 반환.
     """
-    required_len = MA_PERIOD + TREND_LOOKBACK_DAYS
+    # TREND_LOOKBACK_DAYS개의 "유효한" MA5 값을 얻으려면
+    # 최소 MA_PERIOD + TREND_LOOKBACK_DAYS - 1개의 종가가 필요
+    required_len = MA_PERIOD + TREND_LOOKBACK_DAYS - 1
 
     if len(closes) < required_len:
         return "insufficient"
 
-    ma = pd.Series(closes).rolling(window=MA_PERIOD).mean()
+    ma = pd.Series(closes).rolling(window=MA_PERIOD).mean().dropna()
 
-    ma_today = ma.iloc[-1]
-    ma_past = ma.iloc[-1 - TREND_LOOKBACK_DAYS]  # TREND_LOOKBACK_DAYS 거래일 전의 MA5 값
-
-    if pd.isna(ma_today) or pd.isna(ma_past):
+    if len(ma) < TREND_LOOKBACK_DAYS:
         return "insufficient"
 
-    if ma_today < ma_past:
+    # 최근 TREND_LOOKBACK_DAYS개의 MA5 값(어제까지)로 추세선 기울기 계산
+    ma_window = ma.iloc[-TREND_LOOKBACK_DAYS:].values
+    x = np.arange(len(ma_window))
+
+    slope, _ = np.polyfit(x, ma_window, 1)
+
+    if slope < 0:
         return "down"
-    elif ma_today > ma_past:
+    elif slope > 0:
         return "up"
     return "flat"
 
