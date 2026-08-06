@@ -426,9 +426,9 @@ def calc_ma_trend(closes):
     return "down"
 
 
-def calc_max_body(bodies, lookback=BODY_LOOKBACK_DAYS):
+def calc_avg_body(bodies, lookback=BODY_LOOKBACK_DAYS):
     """
-    최근 lookback(기본 30)거래일 중 가장 큰 캔들 몸통 크기 반환.
+    최근 lookback(기본 30)거래일의 평균 캔들 몸통 크기 계산.
     데이터가 MIN_BODY_HISTORY_DAYS보다 적으면 None 반환(판단 불가).
     """
     recent = bodies[-lookback:] if len(bodies) >= lookback else bodies
@@ -436,7 +436,7 @@ def calc_max_body(bodies, lookback=BODY_LOOKBACK_DAYS):
     if len(recent) < MIN_BODY_HISTORY_DAYS:
         return None
 
-    return max(recent)
+    return sum(recent) / len(recent)
 
 
 # ==================================
@@ -478,25 +478,25 @@ def main():
         print("오늘 날짜 컬럼 없음 → 전체 과거 데이터로 계산합니다.")
 
     # -------------------------------
-    # 종목별 5일 이평선 추세(30거래일 전 대비) + 30거래일 최대 캔들 몸통 계산
+    # 종목별 5일 이평선 추세(30거래일 회귀+최근반등체크) + 30거래일 평균 캔들 몸통 계산
     # -------------------------------
     trends = []
-    max_bodies = []
+    avg_bodies = []
     for _, row in history.iterrows():
         closes = parse_close_series(row, date_columns)
         trend = calc_ma_trend(closes)
         trends.append(trend)
 
         bodies = parse_body_series(row, date_columns)
-        max_body = calc_max_body(bodies)
-        max_bodies.append(max_body)
+        avg_body = calc_avg_body(bodies)
+        avg_bodies.append(avg_body)
 
     history["ma_trend"] = trends
-    history["max_body"] = max_bodies
+    history["avg_body"] = avg_bodies
 
-    # 이평선 하향 + 최대 몸통 계산 가능(데이터 충분)한 종목만 1차 후보로 선정
+    # 이평선 하향 + 평균 몸통 계산 가능(데이터 충분)한 종목만 1차 후보로 선정
     down_trend_stocks = history[
-        (history["ma_trend"] == "down") & (history["max_body"].notna())
+        (history["ma_trend"] == "down") & (history["avg_body"].notna())
     ]
     print(f"5일 이평선 하향(30거래일 기준) 종목 수 : {len(down_trend_stocks)}")
 
@@ -511,7 +511,7 @@ def main():
     # -------------------------------
     token = get_access_token()
     stock_names = down_trend_stocks["name"].tolist()
-    max_body_lookup = dict(zip(down_trend_stocks["name"], down_trend_stocks["max_body"]))
+    avg_body_lookup = dict(zip(down_trend_stocks["name"], down_trend_stocks["avg_body"]))
     total = len(stock_names)
     print(f"실시간 조회 대상 : {total}개 종목")
 
@@ -546,12 +546,12 @@ def main():
         return
 
     # -------------------------------
-    # 양봉 판단 (현재가 > 시가) + 오늘 몸통 크기가 30거래일 중 최대 몸통보다 큰지 판단
+    # 양봉 판단 (현재가 > 시가) + 오늘 몸통 크기가 30거래일 평균 몸통보다 큰지 판단
     # -------------------------------
     today["bullish"] = today["current_price"] > today["open"]
     today["today_body"] = (today["current_price"] - today["open"]).abs()
-    today["max_body"] = today["name"].map(max_body_lookup)
-    today["body_bigger"] = today["today_body"] > today["max_body"]
+    today["avg_body"] = today["name"].map(avg_body_lookup)
+    today["body_bigger"] = today["today_body"] > today["avg_body"]
 
     result = today[today["bullish"] & today["body_bigger"]]
 
@@ -561,18 +561,18 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        header = f"📉📈 5일선 하향(30일) + 양봉 + 30일 내 최대 몸통 갱신 종목 (총 {len(result)}개)"
+        header = f"📉📈 5일선 하향(30일) + 양봉 + 몸통 확대 종목 (총 {len(result)}개)"
         lines = []
         for _, r in result.iterrows():
             print("★", r["name"])
             lines.append(
                 f"★ {r['name']} "
                 f"(시가 {r['open']:.0f} → 현재가 {r['current_price']:.0f}, "
-                f"오늘 몸통 {r['today_body']:.0f} / 30일 내 최대 몸통 {r['max_body']:.0f})\n"
+                f"오늘 몸통 {r['today_body']:.0f} / 평균 몸통 {r['avg_body']:.0f})\n"
             )
         send_telegram_long(header, lines)
     else:
-        send_telegram("📉 오늘 조건 만족 종목 없음 (이평선 하향은 있으나 양봉+몸통 갱신 조건 미충족)")
+        send_telegram("📉 오늘 조건 만족 종목 없음 (이평선 하향은 있으나 양봉+몸통 확대 조건 미충족)")
 
     print("텔레그램 전송 완료")
 
