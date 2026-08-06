@@ -1,4 +1,4 @@
-name: Volatility Breakout Scan
+name: 돌파종목 추출
 on:
   workflow_dispatch:
 
