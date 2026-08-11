@@ -43,8 +43,13 @@ BATCH_SIZE = 30
 # 이동평균선 계산 기간 (거래일 기준)
 MA_PERIOD = 5
 
-# 이평선 하향 추세 판단 기준: 오늘 MA5 값을 며칠 전 MA5 값과 비교할지 (거래일 기준)
-TREND_LOOKBACK_DAYS = 10
+# 이평선 하향 추세 판단 기준: 최근 며칠간의 MA5 흐름을 관찰할지 (거래일 기준)
+TREND_LOOKBACK_DAYS = 60
+
+# "거의 하향" 판단 기준: 관찰 구간(TREND_LOOKBACK_DAYS)의 일별 증감(diff) 중
+# 하락한 날의 비율이 이 값 이상이면 하향 추세로 인정한다.
+# 1.0으로 두면 기존과 동일하게 완전 단조하락만 인정하는 것과 같아진다.
+TREND_DOWN_RATIO = 0.8
 
 # 캔들 몸통 평균 계산 기간 (거래일 기준)
 BODY_LOOKBACK_DAYS = 30
@@ -378,9 +383,15 @@ def parse_body_series(row, date_columns):
 
 def calc_ma_trend(closes):
     """
-    최근 TREND_LOOKBACK_DAYS(기본 30)거래일 동안의 5일 이동평균선이
-    하루도 빠짐없이 계속 하락(단조 감소)하는 경우에만 'down'으로 판단.
-    10거래일 구간 중 단 하루라도 MA5가 오르거나 유지되면 하향 추세로 인정하지 않음.
+    최근 TREND_LOOKBACK_DAYS(기본 60)거래일 동안의 5일 이동평균선이
+    "거의" 하락 추세인 경우에만 'down'으로 판단.
+
+    기존처럼 하루도 빠짐없이 하락(단조감소)해야 하는 엄격한 기준 대신,
+    관찰 구간의 일별 증감(diff) 중 하락한 날의 비율이 TREND_DOWN_RATIO
+    (기본 0.8, 즉 80%) 이상이고, 동시에 구간의 마지막 MA5 값이 처음 MA5
+    값보다 낮을 때(전체적으로도 실제로 내려갔을 때)만 'down'으로 인정한다.
+    (비율 조건만 두면 중간에 등락을 반복하다 결국 시작점보다 높아진 경우까지
+    통과할 수 있어, 전체 하락 여부를 함께 확인한다.)
 
     closes 리스트는 "오늘"을 제외한 어제까지의 종가(오래된 -> 최신 순)라고 가정.
 
@@ -401,10 +412,16 @@ def calc_ma_trend(closes):
     # 최근 TREND_LOOKBACK_DAYS개의 MA5 값(어제까지)
     ma_window = ma.iloc[-TREND_LOOKBACK_DAYS:]
 
-    # 하루 전 대비 매일의 증감(diff) 계산 -> 전부 음수(하락)여야 '단조 하락'
+    # 하루 전 대비 매일의 증감(diff) 계산
     diffs = ma_window.diff().dropna()
 
-    if (diffs < 0).all():
+    if len(diffs) == 0:
+        return "insufficient"
+
+    down_ratio = (diffs < 0).sum() / len(diffs)
+    overall_declined = ma_window.iloc[-1] < ma_window.iloc[0]
+
+    if down_ratio >= TREND_DOWN_RATIO and overall_declined:
         return "down"
 
     return "not_down"
@@ -431,7 +448,7 @@ def main():
     start_time = time.time()
 
     print("=" * 40)
-    print("5일선 하향(10일) + 양봉 + 몸통 확대 검색 시작")
+    print("5일선 거의 하향(60일, 80%) + 양봉 + 몸통 확대 검색 시작")
     print("=" * 40)
 
     # -------------------------------
@@ -479,7 +496,7 @@ def main():
         print("오늘 날짜 컬럼 없음 → 전체 과거 데이터로 계산합니다.")
 
     # -------------------------------
-    # 종목별 5일 이평선 추세(10거래일 단조하락) + 30거래일 평균 캔들 몸통 계산
+    # 종목별 5일 이평선 추세(60거래일 중 80% 이상 하락 + 전체 하락) + 30거래일 평균 캔들 몸통 계산
     # -------------------------------
     trends = []
     avg_bodies = []
@@ -499,7 +516,7 @@ def main():
     down_trend_stocks = history[
         (history["ma_trend"] == "down") & (history["avg_body"].notna())
     ]
-    print(f"5일 이평선 하향(10거래일 기준) 종목 수 : {len(down_trend_stocks)}")
+    print(f"5일 이평선 거의 하향({TREND_LOOKBACK_DAYS}거래일 중 {int(TREND_DOWN_RATIO*100)}% 이상) 종목 수 : {len(down_trend_stocks)}")
 
     if down_trend_stocks.empty:
         print("이평선 하향 조건을 만족하는 종목이 없습니다.")
@@ -589,7 +606,7 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        header = f"📉📈 5일선 하향(10일) + 양봉 + 몸통 확대 종목 (총 {len(result)}개)"
+        header = f"📉📈 5일선 거의 하향({TREND_LOOKBACK_DAYS}일) + 양봉 + 몸통 확대 종목 (총 {len(result)}개)"
         lines = []
         for _, r in result.iterrows():
             print("★", r["name"])
