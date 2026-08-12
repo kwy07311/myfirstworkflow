@@ -54,7 +54,7 @@ TREND_LOOKBACK_DAYS = 55
 # "거의 하향" 판단 기준: 관찰 구간(TREND_LOOKBACK_DAYS)의 일별 증감(diff) 중
 # 하락한 날의 비율이 이 값 이상이면 하향 추세로 인정한다.
 # 1.0으로 두면 기존과 동일하게 완전 단조하락만 인정하는 것과 같아진다.
-TREND_DOWN_RATIO = 0.6
+TREND_DOWN_RATIO = 0.75
 
 # 캔들 몸통 평균 계산 기간 (거래일 기준)
 BODY_LOOKBACK_DAYS = 30
