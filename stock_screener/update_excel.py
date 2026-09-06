@@ -4,7 +4,7 @@ from pykrx_range import get_range_data
 from logger import log
 
 STOCK_FILE = "input/mydata2.xlsx"
-MAX_DATE_COLUMNS = 60   # 기존 daily_update는 10일치, stock_screener는 20일 이평선 계산을 위해 60일치 보관
+MAX_DATE_COLUMNS = 120   # 기존 daily_update는 10일치, stock_screener는 20일 이평선 계산을 위해 60일치 보관
 
 
 def extract_code(value):
