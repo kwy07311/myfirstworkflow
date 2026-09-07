@@ -21,12 +21,14 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 REAL_URL = "https://openapi.koreainvestment.com:9443"
 
+# 두 기법 모두 OHLCV 셀 포맷("고가_시가_저가_종가_거래량")을 쓰는
+# mydata2.xlsx 하나만 사용한다. (mydata.xlsx의 "변동폭_거래량" 포맷은
+# mydata2.xlsx의 고가-저가로 그대로 계산 가능한 하위호환 데이터라 별도로 읽지 않음)
 HISTORY_FILE = "input/mydata2.xlsx"
-RESULT_JSON = "../docs/screener_data.json"   # 기존 daily_update의 ../docs/data.json과 겹치지 않도록 파일명 분리
+RESULT_JSON = "../docs/find_my_strategy_data.json"
 
-# 토큰 캐시 파일 (stock_screener 폴더 내부에서 독립적으로 관리)
-# daily_update의 .token_state.json과는 완전히 별개 파일 (서로 영향 없음)
-TOKEN_STATE_FILE = ".token_state.json"
+# 토큰 캐시 파일 (이 스크립트 전용, 다른 스크립트의 캐시와 분리)
+TOKEN_STATE_FILE = ".token_state_find_my_strategy.json"
 
 # 만료 판단시 안전마진(분)
 TOKEN_SAFETY_MARGIN_MIN = 30
@@ -40,27 +42,17 @@ RATE_LIMIT_PER_SEC = 10
 # 관심종목(멀티종목) 시세조회 API는 1회 호출에 최대 30종목까지 지원
 BATCH_SIZE = 30
 
-# 이동평균선 계산 기간 (거래일 기준)
+# ---- 기법 A: 5일선 거의 하향 + 양봉 + 몸통 확대 ----
 MA_PERIOD = 5
-
-# 이평선 하향 추세 판단 기준: 최근 며칠간의 MA5 흐름을 관찰할지 (거래일 기준)
-# 주의: MA5 값 하나를 만드는 데 5일치 종가가 필요하므로, 실제로 필요한 원본 종가 개수는
-# MA_PERIOD + TREND_LOOKBACK_DAYS - 1 이다. 보유 데이터가 60거래일(고정)까지만 유지되므로
-# 이 값을 60으로 두면 필요 데이터가 64일이 되어 항상 'insufficient'로 빠지게 된다.
-# 60거래일 데이터로 낼 수 있는 최대 MA5 비교 가능 일수는 60 - MA_PERIOD + 1 = 56일이므로
-# 약간의 여유를 두고 55로 설정한다. (보유 데이터 기간이 더 늘어나면 같이 올려도 된다)
 TREND_LOOKBACK_DAYS = 55
-
-# "거의 하향" 판단 기준: 관찰 구간(TREND_LOOKBACK_DAYS)의 일별 증감(diff) 중
-# 하락한 날의 비율이 이 값 이상이면 하향 추세로 인정한다.
-# 1.0으로 두면 기존과 동일하게 완전 단조하락만 인정하는 것과 같아진다.
 TREND_DOWN_RATIO = 0.75
-
-# 캔들 몸통 평균 계산 기간 (거래일 기준)
 BODY_LOOKBACK_DAYS = 30
-
-# 몸통 평균 계산에 필요한 최소 과거 데이터 일수 (이보다 적으면 판단 불가로 제외)
 MIN_BODY_HISTORY_DAYS = 5
+
+# ---- 기법 B: 변동폭 돌파 + 양봉 + 윗꼬리 짧음 + 거래량 스파이크 ----
+MIN_VOLUME_HISTORY_DAYS = 3
+VOLUME_SPIKE_MULTIPLIER = 1.5
+UPPER_SHADOW_MAX_RATIO = 0.1
 
 # 디버그: 첫 배치에서 API 원본 응답 필드를 한 번 출력할지 여부
 DEBUG_PRINT_RAW_OUTPUT = False
@@ -109,10 +101,7 @@ def send_telegram(message):
 
 
 def send_telegram_long(header, lines, chunk_char_limit=3500):
-    """
-    텔레그램 메시지 4096자 제한 대응.
-    header + lines를 chunk_char_limit 기준으로 여러 메시지로 쪼개서 순차 전송.
-    """
+    """텔레그램 메시지 4096자 제한 대응. header + lines를 나눠서 순차 전송."""
     if not lines:
         send_telegram(header)
         return
@@ -133,7 +122,7 @@ def send_telegram_long(header, lines, chunk_char_limit=3500):
     for idx, chunk in enumerate(chunks, start=1):
         prefix = f"[{idx}/{total}]\n" if total > 1 else ""
         send_telegram(prefix + chunk)
-        time.sleep(0.5)  # 텔레그램 API 연속 호출 방지용 짧은 대기
+        time.sleep(0.5)
 
 
 # ==================================
@@ -165,7 +154,6 @@ def save_result_json(result):
 # ==================================
 
 def _load_cached_token():
-    """캐시 파일에서 유효한 토큰을 읽어온다. 없거나 만료됐으면 None 반환."""
     if not os.path.exists(TOKEN_STATE_FILE):
         return None
 
@@ -195,7 +183,6 @@ def _load_cached_token():
 
 
 def _issue_new_token():
-    """KIS 서버에 실제로 새 토큰을 요청하고 캐시 파일에 저장한다."""
     url = f"{REAL_URL}/oauth2/tokenP"
     body = {
         "grant_type": "client_credentials",
@@ -207,7 +194,6 @@ def _issue_new_token():
     data = response.json()
 
     token = data["access_token"]
-
     expire_at = datetime.now(timezone.utc) + timedelta(hours=23)
 
     with open(TOKEN_STATE_FILE, "w", encoding="utf-8") as f:
@@ -228,17 +214,12 @@ def get_access_token():
 
 
 # ==================================
-# 종목코드 추출
-# 삼성전자_005930
+# 종목코드 추출 (삼성전자_005930 -> 005930)
 # ==================================
 
 def extract_code(name):
     return str(name).split("_")[-1]
 
-
-# ==================================
-# 종목 리스트를 BATCH_SIZE 단위로 분할
-# ==================================
 
 def chunk_list(items, size):
     for i in range(0, len(items), size):
@@ -246,7 +227,7 @@ def chunk_list(items, size):
 
 
 # ==================================
-# 현재가 및 당일 시가/고가/저가 조회 (최대 30종목/1회)
+# 현재가 및 당일 시가/고가/저가/거래량 조회 (최대 30종목/1회)
 # ==================================
 
 def get_stock_price_batch(token, name_batch):
@@ -323,13 +304,38 @@ def get_stock_price_batch(token, name_batch):
 
 
 # ==================================
-# 과거 데이터에서 종가 시계열 추출 + 5일 이평선 추세 판단
+# 날짜 칼럼 정규화 (update_excel.py와 동일 방식)
+# ==================================
+
+def normalize_date_column(col):
+    if isinstance(col, str) and col.strip().lower() == "name":
+        return "name"
+    if isinstance(col, (pd.Timestamp, datetime)):
+        return col.strftime("%y%m%d")
+    col_str = str(col).strip()
+    if "-" in col_str:
+        try:
+            parsed = datetime.strptime(col_str, "%y-%m-%d")
+            return parsed.strftime("%y%m%d")
+        except ValueError:
+            pass
+    try:
+        return str(int(float(col_str))).zfill(6)
+    except ValueError:
+        return col_str
+
+
+# ==================================
+# 과거 데이터 파싱
 # 셀 형식: "고가_시가_저가_종가_거래량"
 # ==================================
 
-def parse_close_series(row, date_columns):
-    """오래된 -> 최신 순으로 정렬된 종가 리스트 반환"""
-    closes = []
+def parse_history_series(row, date_columns):
+    """
+    오래된 -> 최신 순으로 정렬된 (close, body, range, volume) 4종 시계열을 반환.
+    한 번의 컬럼 순회로 기법 A/B에 필요한 값을 모두 뽑아낸다.
+    """
+    closes, bodies, ranges, volumes = [], [], [], []
 
     for col in date_columns:
         val = row[col]
@@ -338,88 +344,42 @@ def parse_close_series(row, date_columns):
             continue
 
         val = str(val)
-
         if "_" not in val:
             continue
 
         parts = val.split("_")
-
         if len(parts) != 5:
             continue
 
         try:
-            close = float(parts[3])  # 고가_시가_저가_종가_거래량 -> index 3
-            closes.append(close)
+            high = float(parts[0])
+            open_ = float(parts[1])
+            low = float(parts[2])
+            close = float(parts[3])
+            volume = float(parts[4])
         except ValueError:
             continue
 
-    return closes
+        closes.append(close)
+        bodies.append(abs(close - open_))
+        ranges.append(high - low)
+        volumes.append(volume)
 
-
-def parse_body_series(row, date_columns):
-    """오래된 -> 최신 순으로 정렬된 캔들 몸통 크기(|종가-시가|) 리스트 반환"""
-    bodies = []
-
-    for col in date_columns:
-        val = row[col]
-
-        if pd.isna(val):
-            continue
-
-        val = str(val)
-
-        if "_" not in val:
-            continue
-
-        parts = val.split("_")
-
-        if len(parts) != 5:
-            continue
-
-        try:
-            open_ = float(parts[1])  # 고가_시가_저가_종가_거래량 -> index 1
-            close = float(parts[3])  # index 3
-            bodies.append(abs(close - open_))
-        except ValueError:
-            continue
-
-    return bodies
+    return closes, bodies, ranges, volumes
 
 
 def calc_ma_trend(closes):
-    """
-    최근 TREND_LOOKBACK_DAYS(기본 55)거래일 동안의 5일 이동평균선이
-    "거의" 하락 추세인 경우에만 'down'으로 판단.
-
-    기존처럼 하루도 빠짐없이 하락(단조감소)해야 하는 엄격한 기준 대신,
-    관찰 구간의 일별 증감(diff) 중 하락한 날의 비율이 TREND_DOWN_RATIO
-    (기본 0.8, 즉 80%) 이상이고, 동시에 구간의 마지막 MA5 값이 처음 MA5
-    값보다 낮을 때(전체적으로도 실제로 내려갔을 때)만 'down'으로 인정한다.
-    (비율 조건만 두면 중간에 등락을 반복하다 결국 시작점보다 높아진 경우까지
-    통과할 수 있어, 전체 하락 여부를 함께 확인한다.)
-
-    closes 리스트는 "오늘"을 제외한 어제까지의 종가(오래된 -> 최신 순)라고 가정.
-
-    데이터가 부족하면 'insufficient', 아니면 'down' / 'not_down' 반환.
-    """
-    # TREND_LOOKBACK_DAYS개의 "유효한" MA5 값을 얻으려면
-    # 최소 MA_PERIOD + TREND_LOOKBACK_DAYS - 1개의 종가가 필요
+    """기법 A: 최근 TREND_LOOKBACK_DAYS거래일의 5일 이평선이 '거의' 하향인지 판단."""
     required_len = MA_PERIOD + TREND_LOOKBACK_DAYS - 1
-
     if len(closes) < required_len:
         return "insufficient"
 
     ma = pd.Series(closes).rolling(window=MA_PERIOD).mean().dropna()
-
     if len(ma) < TREND_LOOKBACK_DAYS:
         return "insufficient"
 
-    # 최근 TREND_LOOKBACK_DAYS개의 MA5 값(어제까지)
     ma_window = ma.iloc[-TREND_LOOKBACK_DAYS:]
-
-    # 하루 전 대비 매일의 증감(diff) 계산
     diffs = ma_window.diff().dropna()
-
     if len(diffs) == 0:
         return "insufficient"
 
@@ -428,21 +388,27 @@ def calc_ma_trend(closes):
 
     if down_ratio >= TREND_DOWN_RATIO and overall_declined:
         return "down"
-
     return "not_down"
 
 
 def calc_avg_body(bodies, lookback=BODY_LOOKBACK_DAYS):
-    """
-    최근 lookback(기본 30)거래일의 평균 캔들 몸통 크기 계산.
-    데이터가 MIN_BODY_HISTORY_DAYS보다 적으면 None 반환(판단 불가).
-    """
+    """기법 A: 최근 lookback거래일의 평균 캔들 몸통 크기."""
     recent = bodies[-lookback:] if len(bodies) >= lookback else bodies
-
     if len(recent) < MIN_BODY_HISTORY_DAYS:
         return None
-
     return sum(recent) / len(recent)
+
+
+def calc_max_range(ranges):
+    """기법 B: 과거 최대 변동폭(고가-저가)."""
+    return max(ranges) if ranges else 0.0
+
+
+def calc_avg_volume(volumes):
+    """기법 B: 과거 평균 거래량 (데이터 부족 시 0 -> 조건 자동 통과로 처리)."""
+    if len(volumes) >= MIN_VOLUME_HISTORY_DAYS:
+        return sum(volumes) / len(volumes)
+    return 0.0
 
 
 # ==================================
@@ -453,47 +419,26 @@ def main():
     start_time = time.time()
 
     print("=" * 40)
-    print("5일선 거의 하향(55일, 80%) + 양봉 + 몸통 확대 검색 시작")
+    print("[통합] 5일선 하향+양봉+몸통확대 (기법A) OR 변동폭 돌파+양봉+거래량 스파이크 (기법B)")
     print("=" * 40)
 
     # -------------------------------
-    # 과거 데이터 로드
+    # 과거 데이터 로드 + 정규화
     # -------------------------------
     history = pd.read_excel(HISTORY_FILE)
+    history.columns = [normalize_date_column(c) for c in history.columns]
 
-    # 칼럼 헤더 형식 통일 (update_excel.py와 동일한 방식: datetime/대시 포함 등을 전부 YYMMDD 문자열로)
-    def _normalize_date_column(col):
-        if col == "name":
-            return col
-        if isinstance(col, (pd.Timestamp, datetime)):
-            return col.strftime("%y%m%d")
-        col_str = str(col).strip()
-        if "-" in col_str:
-            try:
-                parsed = datetime.strptime(col_str, "%y-%m-%d")
-                return parsed.strftime("%y%m%d")
-            except ValueError:
-                pass
-        try:
-            return str(int(float(col_str))).zfill(6)
-        except ValueError:
-            return col_str
-
-    history.columns = [_normalize_date_column(c) for c in history.columns]
+    if "name" not in history.columns:
+        raise ValueError(f"'name' 컬럼을 찾을 수 없습니다. 실제 컬럼: {history.columns.tolist()}")
 
     all_date_columns = [c for c in history.columns if c != "name"]
 
-    # 오늘 날짜(KST) 컬럼이 이미 들어가 있다면 이평선 계산에서는 제외
-    # (daily_add_price.py가 먼저 실행되어 오늘 컬럼이 채워진 뒤에 이 스크립트를 돌리더라도
-    #  항상 "오늘 실시간 시세 vs 어제까지의 과거 데이터"로 비교되도록 보장)
-    _kst = timezone(timedelta(hours=9))
-    _today_kst_str = datetime.now(_kst).strftime("%y%m%d")  # 예: "260806"
-
-    def _is_today_column(col):
-        return str(col) == _today_kst_str
-
-    today_column_found = [c for c in all_date_columns if _is_today_column(c)]
-    date_columns = [c for c in all_date_columns if not _is_today_column(c)]
+    # 오늘 날짜(KST) 컬럼이 이미 채워져 있다면 과거 통계 계산에서는 제외
+    # (오늘 실시간 시세 vs 어제까지의 과거 데이터로 항상 비교되도록 보장)
+    kst = timezone(timedelta(hours=9))
+    today_kst_str = datetime.now(kst).strftime("%y%m%d")
+    today_column_found = [c for c in all_date_columns if str(c) == today_kst_str]
+    date_columns = [c for c in all_date_columns if str(c) != today_kst_str]
 
     if today_column_found:
         print(f"오늘 날짜 컬럼 감지({today_column_found}) → 비교 대상에서 제외하고 어제까지 데이터로 계산합니다.")
@@ -501,42 +446,33 @@ def main():
         print("오늘 날짜 컬럼 없음 → 전체 과거 데이터로 계산합니다.")
 
     # -------------------------------
-    # 종목별 5일 이평선 추세(55거래일 중 80% 이상 하락 + 전체 하락) + 30거래일 평균 캔들 몸통 계산
+    # 종목별 과거 통계 계산 (기법 A, B에 필요한 값 모두)
     # -------------------------------
-    trends = []
-    avg_bodies = []
+    ma_trends, avg_bodies, max_ranges, avg_volumes = [], [], [], []
+
     for _, row in history.iterrows():
-        closes = parse_close_series(row, date_columns)
-        trend = calc_ma_trend(closes)
-        trends.append(trend)
+        closes, bodies, ranges, volumes = parse_history_series(row, date_columns)
+        ma_trends.append(calc_ma_trend(closes))
+        avg_bodies.append(calc_avg_body(bodies))
+        max_ranges.append(calc_max_range(ranges))
+        avg_volumes.append(calc_avg_volume(volumes))
 
-        bodies = parse_body_series(row, date_columns)
-        avg_body = calc_avg_body(bodies)
-        avg_bodies.append(avg_body)
-
-    history["ma_trend"] = trends
+    history["ma_trend"] = ma_trends
     history["avg_body"] = avg_bodies
+    history["max_history_range"] = max_ranges
+    history["avg_volume"] = avg_volumes
 
-    # 이평선 하향 + 평균 몸통 계산 가능(데이터 충분)한 종목만 1차 후보로 선정
-    down_trend_stocks = history[
-        (history["ma_trend"] == "down") & (history["avg_body"].notna())
-    ]
-    print(f"5일 이평선 거의 하향({TREND_LOOKBACK_DAYS}거래일 중 {int(TREND_DOWN_RATIO*100)}% 이상) 종목 수 : {len(down_trend_stocks)}")
-
-    if down_trend_stocks.empty:
-        print("이평선 하향 조건을 만족하는 종목이 없습니다.")
-        save_result_json(down_trend_stocks)
-        send_telegram("📉 오늘 조건 만족 종목 없음 (이평선 하향 종목 자체가 없음)")
-        return
+    print(f"기법A 대상(이평선 하향) 종목 수 : {(history['ma_trend'] == 'down').sum()}")
+    print(f"전체 종목 수 : {len(history)}")
 
     # -------------------------------
-    # 이평선 하향 종목만 대상으로 오늘 실시간 시세 조회 (API 호출 최소화)
+    # OR 조건이므로 기법B는 전체 종목을 대상으로 실시간 조회해야 함
+    # (기법A처럼 이평선 하향 종목만 선별해 조회량을 줄일 수 없음)
     # -------------------------------
     token = get_access_token()
-    stock_names = down_trend_stocks["name"].tolist()
-    avg_body_lookup = dict(zip(down_trend_stocks["name"], down_trend_stocks["avg_body"]))
+    stock_names = history["name"].tolist()
     total = len(stock_names)
-    print(f"실시간 조회 대상 : {total}개 종목")
+    print(f"실시간 조회 대상 : {total}개 종목 (전체)")
 
     batches = list(chunk_list(stock_names, BATCH_SIZE))
     total_batches = len(batches)
@@ -564,18 +500,16 @@ def main():
 
     if today.empty:
         print("조회된 당일 시세 데이터가 없습니다.")
-        print(f"조회 성공 : {success} / 조회 실패 : {fail}")
         if errors:
             print("-- 실패 상세 내역 --")
             for err in errors:
                 print(" -", err)
         save_result_json(today)
-        send_telegram("📉 오늘 조건 만족 종목 없음 (시세 조회 데이터 없음)")
+        send_telegram("📊 오늘 조건 만족 종목 없음 (시세 조회 데이터 없음)")
         return
 
     # -------------------------------
     # 거래정지 등 이상 데이터 제외
-    # (거래정지/미거래 종목은 보통 가격이 0으로 오거나, 당일 거래량이 0으로 옴)
     # -------------------------------
     before_count = len(today)
     today = today[
@@ -592,18 +526,61 @@ def main():
     if today.empty:
         print("거래정지 등 이상치 제외 후 남은 종목이 없습니다.")
         save_result_json(today)
-        send_telegram("📉 오늘 조건 만족 종목 없음 (거래정지 등 제외 후 없음)")
+        send_telegram("📊 오늘 조건 만족 종목 없음 (거래정지 등 제외 후 없음)")
         return
 
     # -------------------------------
-    # 양봉 판단 (현재가 > 시가) + 오늘 몸통 크기가 30거래일 평균 몸통보다 큰지 판단
+    # 과거 통계와 병합
     # -------------------------------
-    today["bullish"] = today["current_price"] > today["open"]
-    today["today_body"] = (today["current_price"] - today["open"]).abs()
-    today["avg_body"] = today["name"].map(avg_body_lookup)
-    today["body_bigger"] = today["today_body"] > today["avg_body"]
+    merged = today.merge(
+        history[["name", "ma_trend", "avg_body", "max_history_range", "avg_volume"]],
+        on="name",
+        how="inner"
+    )
 
-    result = today[today["bullish"] & today["body_bigger"]]
+    # 공통: 양봉 여부, 오늘 몸통, 오늘 변동폭
+    merged["bullish"] = merged["current_price"] > merged["open"]
+    merged["today_body"] = (merged["current_price"] - merged["open"]).abs()
+    merged["today_range"] = merged["high"] - merged["low"]
+
+    # ---- 기법 A: 이평선 거의 하향 + 양봉 + 오늘 몸통 > 평균 몸통 ----
+    merged["body_bigger"] = (
+        merged["avg_body"].notna() & (merged["today_body"] > merged["avg_body"])
+    )
+    merged["technique_a_match"] = (
+        (merged["ma_trend"] == "down") & merged["bullish"] & merged["body_bigger"]
+    )
+
+    # ---- 기법 B: 과거 최대 변동폭 돌파 + 양봉 + 윗꼬리 짧음 + 거래량 스파이크 ----
+    safe_range = merged["today_range"].replace(0, float("nan"))
+    merged["upper_shadow_ratio"] = (merged["high"] - merged["current_price"]) / safe_range
+    merged["range_breakout"] = merged["today_range"] > merged["max_history_range"]
+
+    def check_volume_spike(row):
+        if row["avg_volume"] <= 0:
+            return True  # 과거 거래량 데이터 부족 시 조건 자동 통과
+        return row["volume"] >= (row["avg_volume"] * VOLUME_SPIKE_MULTIPLIER)
+
+    merged["volume_spike"] = merged.apply(check_volume_spike, axis=1)
+    merged["technique_b_match"] = (
+        merged["range_breakout"]
+        & merged["bullish"]
+        & (merged["upper_shadow_ratio"] < UPPER_SHADOW_MAX_RATIO)
+        & merged["volume_spike"]
+    )
+
+    # ---- OR 결합 ----
+    result = merged[merged["technique_a_match"] | merged["technique_b_match"]].copy()
+
+    def _match_label(row):
+        if row["technique_a_match"] and row["technique_b_match"]:
+            return "A+B"
+        if row["technique_a_match"]:
+            return "A"
+        return "B"
+
+    if len(result) > 0:
+        result["matched_by"] = result.apply(_match_label, axis=1)
 
     save_result_json(result)
 
@@ -611,18 +588,17 @@ def main():
     # 텔레그램 전송
     # -------------------------------
     if len(result) > 0:
-        header = f"📉📈 5일선 거의 하향({TREND_LOOKBACK_DAYS}일) + 양봉 + 몸통 확대 종목 (총 {len(result)}개)"
+        header = f"📈 통합 스크리너 (기법A 또는 기법B 만족, 총 {len(result)}개)"
         lines = []
         for _, r in result.iterrows():
-            print("★", r["name"])
+            print("★", r["name"], f"[{r['matched_by']}]")
             lines.append(
-                f"★ {r['name']} "
-                f"(시가 {r['open']:.0f} → 현재가 {r['current_price']:.0f}, "
-                f"오늘 몸통 {r['today_body']:.0f} / 평균 몸통 {r['avg_body']:.0f})\n"
+                f"★ [{r['matched_by']}] {r['name']} "
+                f"(시가 {r['open']:.0f} → 현재가 {r['current_price']:.0f})\n"
             )
         send_telegram_long(header, lines)
     else:
-        send_telegram("📉 오늘 조건 만족 종목 없음 (이평선 하향은 있으나 양봉+몸통 확대 조건 미충족)")
+        send_telegram("📊 오늘 조건 만족 종목 없음 (기법A, 기법B 모두 미충족)")
 
     print("텔레그램 전송 완료")
 
@@ -637,12 +613,14 @@ def main():
         for err in errors:
             key = str(err)[:80]
             error_counts[key] = error_counts.get(key, 0) + 1
-
         print("-- 실패 유형 상위 5개 --")
         for key, count in sorted(error_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
             print(f"  [{count}건] {key}")
 
-    print(f"최종 추출 종목 : {len(result)}")
+    print(f"기법A만 매칭 : {(merged['technique_a_match'] & ~merged['technique_b_match']).sum()}")
+    print(f"기법B만 매칭 : {(merged['technique_b_match'] & ~merged['technique_a_match']).sum()}")
+    print(f"A+B 동시 매칭 : {(merged['technique_a_match'] & merged['technique_b_match']).sum()}")
+    print(f"최종 추출 종목(OR) : {len(result)}")
     print(f"실행 시간 : {elapsed:.1f}초")
     print("=" * 40)
 
