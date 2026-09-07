@@ -16,13 +16,14 @@ def extract_code(value):
 def normalize_date_column(col):
     """
     엑셀 칼럼 헤더를 'YYMMDD'(6자리 문자열, 대시 없음)로 통일.
-    - name 칼럼은 그대로 둠
+    - name 칼럼은 그대로 둠 (대소문자/공백 차이가 있어도 인식)
     - datetime/Timestamp 타입으로 저장된 옛날 칼럼 -> 문자열로 변환
     - '26-08-05' 처럼 대시가 들어간 문자열 -> 대시 제거한 6자리로 변환
     - 이미 'YYMMDD' 형식인 문자열/숫자 -> 그대로 6자리 문자열로 변환
     """
-    if col == "name":
-        return col
+    # name 칼럼은 대소문자/앞뒤 공백에 상관없이 정확히 "name"으로 통일
+    if isinstance(col, str) and col.strip().lower() == "name":
+        return "name"
 
     # datetime, Timestamp 타입 (엑셀이 자동으로 날짜로 인식해버린 경우)
     if isinstance(col, (pd.Timestamp, datetime)):
@@ -42,24 +43,28 @@ def normalize_date_column(col):
     try:
         return str(int(float(col_str))).zfill(6)
     except ValueError:
-        return col_str  # 위 어떤 패턴에도 안 맞으면 원본 그대로 (name 등 예외 상황 대비)
+        return col_str  # 위 어떤 패턴에도 안 맞으면 원본 그대로 (예상 못한 예외 상황 대비)
 
 
 def update_excel(target_date=None):
-
     df = pd.read_excel(STOCK_FILE)
 
     # 칼럼 헤더 형식 통일 (기존 datetime/대시 포함 칼럼들을 전부 YYMMDD 문자열로 정리)
     df.columns = [normalize_date_column(col) for col in df.columns]
 
-    codes = []
+    # 정규화 이후에도 name 칼럼이 없다면 여기서 바로 명확한 에러로 중단
+    # (원인을 몰라 KeyError로 죽는 대신, 실제 컬럼 목록을 보여줌)
+    if "name" not in df.columns:
+        raise ValueError(
+            f"'name' 컬럼을 찾을 수 없습니다. 실제 컬럼 목록: {df.columns.tolist()}"
+        )
 
+    codes = []
     for value in df["name"]:
         code = extract_code(value)
         codes.append(code)
 
     log(f"조회 종목 수 : {len(codes)}")
-
 
     # 날짜 지정 조회
     date, range_data = get_range_data(
@@ -79,16 +84,12 @@ def update_excel(target_date=None):
 
     log(f"{date} 데이터 업데이트 (조회 성공 종목 수 : {len(range_data)}/{len(codes)})")
 
-
     if date not in df.columns:
         df[date] = None
 
-
     for idx, code in enumerate(codes):
-
         if code in range_data:
             df.at[idx, date] = range_data[code]
-
 
     # name 제외 날짜 컬럼
     date_columns = [
@@ -96,24 +97,18 @@ def update_excel(target_date=None):
         if col != "name"
     ]
 
-
     # 최근 60개(MAX_DATE_COLUMNS)만 유지
     if len(date_columns) > MAX_DATE_COLUMNS:
-
         columns_to_drop = date_columns[
             :len(date_columns) - MAX_DATE_COLUMNS
         ]
-
         df = df.drop(columns=columns_to_drop)
-
         log(
             f"오래된 날짜 칼럼 삭제 : {columns_to_drop}"
         )
-
 
     df.to_excel(
         STOCK_FILE,
         index=False
     )
-
     log("엑셀 업데이트 완료")
