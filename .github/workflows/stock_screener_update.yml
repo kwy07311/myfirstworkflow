@@ -1,4 +1,5 @@
 name: 데이터 업데이트
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,46 +7,71 @@ on:
         description: "조회 날짜 입력 (YYMMDD, 예: 260806)"
         required: false
         default: ""
+
 permissions:
   contents: write
+
 jobs:
   screener-update:
     runs-on: ubuntu-latest
+
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install packages
         run: |
-          pip install pandas openpyxl pykrx requests
-      - name: 진단 - import되는 파일 경로 확인
+          python -m pip install --upgrade pip
+          python -m pip install pandas openpyxl pykrx requests
+          python -m pip show pykrx
+
+      - name: KRX 환경 확인
         env:
           KRX_ID: ${{ secrets.KRX_ID }}
           KRX_PW: ${{ secrets.KRX_PW }}
         run: |
-          cd stock_screener
-          python -c "
-          import pykrx_range, update_excel, os
-          print('pykrx_range.py 실제 경로 :', os.path.abspath(pykrx_range.__file__))
-          print('update_excel.py 실제 경로 :', os.path.abspath(update_excel.__file__))
-          "
+          python - <<'PY'
+          import os
+          import pykrx
+
+          print("====================================")
+          print("Python / pykrx 환경 확인")
+          print("====================================")
+          print("pykrx version :", getattr(pykrx, "__version__", "unknown"))
+          print("KRX_ID 설정   :", bool(os.getenv("KRX_ID")))
+          print("KRX_PW 설정   :", bool(os.getenv("KRX_PW")))
+          print("====================================")
+          PY
+
       - name: Run daily price update
         env:
           KRX_ID: ${{ secrets.KRX_ID }}
           KRX_PW: ${{ secrets.KRX_PW }}
         run: |
           cd stock_screener
+
+          echo "===================================="
+          echo "주식 데이터 업데이트 시작"
+          echo "조회 날짜 : ${{ github.event.inputs.target_date }}"
+          echo "===================================="
+
           python daily_add_price.py "${{ github.event.inputs.target_date }}"
+
       - name: Commit updated data
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
+
           git add stock_screener/input/mydata2.xlsx
+
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
