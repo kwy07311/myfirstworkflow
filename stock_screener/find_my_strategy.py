@@ -27,10 +27,9 @@ REAL_URL = "https://openapi.koreainvestment.com:9443"
 HISTORY_FILE = "input/mydata2.xlsx"
 
 # index.html이 fetch하는 파일명과 반드시 일치해야 함.
-#   - data.json          -> "breakout" 탭 (📈 변동폭 돌파 = 기법 B)
-#   - screener_data.json -> "ma" 탭      (📉 5일선 반전   = 기법 A)
-DATA_JSON = "../docs/data.json"
-SCREENER_JSON = "../docs/screener_data.json"
+# 기법 A(5일선 반전) + 기법 B(변동폭 돌파)를 OR로 합쳐 한 파일에 저장한다.
+# 각 종목 항목에는 matched_by("A" / "B" / "A+B") 라벨이 포함된다.
+RESULT_JSON = "../docs/data.json"
 
 # 토큰 캐시 파일 (이 스크립트 전용, 다른 스크립트의 캐시와 분리)
 TOKEN_STATE_FILE = ".token_state_find_my_strategy.json"
@@ -135,11 +134,21 @@ def send_telegram_long(header, lines, chunk_char_limit=3500):
 # ==================================
 
 def save_result_json(result, output_path):
-    """result(DataFrame)를 output_path에 웹페이지가 읽는 포맷으로 저장한다."""
+    """
+    result(DataFrame)를 output_path에 웹페이지가 읽는 포맷으로 저장한다.
+    기법 A/B를 하나의 파일로 통합 저장하며, 각 종목에는 어떤 기법으로
+    매칭됐는지 알 수 있도록 matched_by("A" / "B" / "A+B") 라벨을 포함한다.
+    """
     kst = timezone(timedelta(hours=9))
     now = datetime.now(kst)
 
-    stock_list = result["name"].tolist() if len(result) > 0 else []
+    if len(result) > 0:
+        stock_list = result.apply(
+            lambda r: {"name": r["name"], "matched_by": r.get("matched_by", "")},
+            axis=1
+        ).tolist()
+    else:
+        stock_list = []
 
     data = {
         "date": now.strftime("%Y-%m-%d"),
@@ -153,12 +162,6 @@ def save_result_json(result, output_path):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
     print(f"결과 JSON 저장 완료 (KST 시간: {now.strftime('%Y-%m-%d %H:%M:%S')}) : {output_path}")
-
-
-def save_all_results_json(technique_a_result, technique_b_result):
-    """기법 A -> screener_data.json(ma 탭), 기법 B -> data.json(breakout 탭)로 각각 저장."""
-    save_result_json(technique_b_result, DATA_JSON)
-    save_result_json(technique_a_result, SCREENER_JSON)
 
 
 # ==================================
@@ -516,7 +519,7 @@ def main():
             print("-- 실패 상세 내역 --")
             for err in errors:
                 print(" -", err)
-        save_all_results_json(today, today)
+        save_result_json(today, RESULT_JSON)
         send_telegram("📊 오늘 조건 만족 종목 없음 (시세 조회 데이터 없음)")
         return
 
@@ -537,7 +540,7 @@ def main():
 
     if today.empty:
         print("거래정지 등 이상치 제외 후 남은 종목이 없습니다.")
-        save_all_results_json(today, today)
+        save_result_json(today, RESULT_JSON)
         send_telegram("📊 오늘 조건 만족 종목 없음 (거래정지 등 제외 후 없음)")
         return
 
@@ -581,7 +584,7 @@ def main():
         & merged["volume_spike"]
     )
 
-    # ---- OR 결합 (텔레그램 알림용) ----
+    # ---- OR 결합 (텔레그램/웹페이지 모두 이 결과 하나로 통일) ----
     result = merged[merged["technique_a_match"] | merged["technique_b_match"]].copy()
 
     def _match_label(row):
@@ -594,12 +597,8 @@ def main():
     if len(result) > 0:
         result["matched_by"] = result.apply(_match_label, axis=1)
 
-    # ---- 웹페이지용 JSON은 기법별로 분리해서 저장 ----
-    # data.json(breakout 탭)          <- 기법 B만 만족한 종목
-    # screener_data.json(ma 탭)       <- 기법 A만 만족한 종목
-    technique_a_only = merged[merged["technique_a_match"]].copy()
-    technique_b_only = merged[merged["technique_b_match"]].copy()
-    save_all_results_json(technique_a_only, technique_b_only)
+    # ---- 웹페이지용 JSON은 기법A/B를 합쳐 하나의 파일에 저장 ----
+    save_result_json(result, RESULT_JSON)
 
     # -------------------------------
     # 텔레그램 전송
