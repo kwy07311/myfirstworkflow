@@ -1,9 +1,11 @@
 <!DOCTYPE html>
+
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
 <title>종목 스크리너</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
 <style>
   body {
     font-family: -apple-system, "Malgun Gothic", sans-serif;
@@ -13,39 +15,28 @@
     background: #f7f7f9;
     color: #222;
   }
-  header { margin-bottom: 16px; }
-  h1 { font-size: 20px; margin-bottom: 4px; }
-  .timestamp { color: #666; font-size: 14px; }
 
-  /* 탭 */
-  .tabs {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 20px;
-    border-bottom: 1px solid #ddd;
+  header {
+    margin-bottom: 16px;
   }
-  .tab-btn {
-    flex: 1;
-    text-align: center;
-    padding: 12px 0;
-    border: none;
-    background: none;
-    font-size: 15px;
-    font-weight: 600;
-    color: #999;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-  }
-  .tab-btn.active {
-    color: #222;
-  }
-  .tab-btn[data-tab="breakout"].active { border-bottom-color: #03c75a; }
-  .tab-btn[data-tab="ma"].active { border-bottom-color: #3b82f6; }
 
-  .tab-panel { display: none; }
-  .tab-panel.active { display: block; }
+  h1 {
+    font-size: 20px;
+    margin-bottom: 4px;
+  }
 
-  .stock-list { list-style: none; padding: 0; }
+  .timestamp {
+    color: #666;
+    font-size: 14px;
+    margin-bottom: 16px;
+  }
+
+  .stock-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
   .stock-item {
     background: #fff;
     border-radius: 10px;
@@ -53,8 +44,18 @@
     margin-bottom: 12px;
     box-shadow: 0 1px 3px rgba(0,0,0,.08);
   }
-  .stock-name { font-weight: 600; font-size: 16px; margin-bottom: 10px; }
-  .btn-group { display: flex; gap: 8px; }
+
+  .stock-name {
+    font-weight: 600;
+    font-size: 16px;
+    margin-bottom: 10px;
+  }
+
+  .btn-group {
+    display: flex;
+    gap: 8px;
+  }
+
   .btn {
     flex: 1;
     text-align: center;
@@ -63,111 +64,246 @@
     text-decoration: none;
     font-size: 14px;
   }
-  .btn-naver { background: #03c75a; color: #fff; }
-  .btn-youtube { background: #ff0000; color: #fff; }
-  .empty { text-align: center; color: #888; padding: 40px 0; }
+
+  .btn-naver {
+    background: #03c75a;
+    color: #fff;
+  }
+
+  .btn-youtube {
+    background: #ff0000;
+    color: #fff;
+  }
+
+  .empty {
+    text-align: center;
+    color: #888;
+    padding: 40px 0;
+  }
+
+  .error {
+    text-align: center;
+    color: #d33;
+    padding: 40px 0;
+  }
 </style>
+
 </head>
+
 <body>
+
 <header>
   <h1>📊 종목 스크리너</h1>
 </header>
 
-<div class="tabs">
-  <button class="tab-btn active" data-tab="breakout">📈 변동폭 돌파</button>
-  <button class="tab-btn" data-tab="ma">📉 5일선 반전</button>
+<div class="timestamp" id="timestamp">
+  불러오는 중...
 </div>
 
-<!-- 기존 기법: 변동폭 돌파 -->
-<div class="tab-panel active" id="panel-breakout">
-  <div class="timestamp" id="timestamp-breakout">불러오는 중...</div>
-  <ul class="stock-list" id="stockList-breakout"></ul>
-  <div class="empty" id="emptyMsg-breakout" style="display:none;">오늘 조건을 만족한 종목이 없습니다.</div>
+<ul class="stock-list" id="stockList"></ul>
+
+<div class="empty" id="emptyMsg" style="display:none;">
+  오늘 조건을 만족한 종목이 없습니다.
 </div>
 
-<!-- 신규 기법: 5일 이평선 하향 + 양봉 -->
-<div class="tab-panel" id="panel-ma">
-  <div class="timestamp" id="timestamp-ma">불러오는 중...</div>
-  <ul class="stock-list" id="stockList-ma"></ul>
-  <div class="empty" id="emptyMsg-ma" style="display:none;">오늘 조건을 만족한 종목이 없습니다.</div>
+<div class="error" id="errorMsg" style="display:none;">
+  데이터를 불러올 수 없습니다.
 </div>
 
 <script>
+
+/*
+ * 종목명 표시
+ *
+ * 예:
+ * 삼성전자_005930
+ *       ↓
+ * 삼성전자
+ */
 function getDisplayName(raw) {
-  // "삼성전자_005930" -> "삼성전자"
+
   const idx = raw.lastIndexOf('_');
-  return idx === -1 ? raw : raw.slice(0, idx);
+
+  return idx === -1
+    ? raw
+    : raw.slice(0, idx);
 }
 
-function renderStocks(data, prefix) {
-  const timestampEl = document.getElementById(`timestamp-${prefix}`);
-  const listEl = document.getElementById(`stockList-${prefix}`);
-  const emptyEl = document.getElementById(`emptyMsg-${prefix}`);
 
-  timestampEl.textContent = `${data.date} ${data.time} 기준`;
+/*
+ * 종목 목록 화면 출력
+ */
+function renderStocks(data) {
 
+  const timestampEl = document.getElementById('timestamp');
+  const listEl = document.getElementById('stockList');
+  const emptyEl = document.getElementById('emptyMsg');
+  const errorEl = document.getElementById('errorMsg');
+
+  // 기존 목록 초기화
+  listEl.innerHTML = '';
+
+  // 오류 메시지 숨김
+  errorEl.style.display = 'none';
+
+  // 날짜 / 시간 표시
+  if (data.date && data.time) {
+    timestampEl.textContent =
+      `${data.date} ${data.time} 기준`;
+  }
+  else if (data.date) {
+    timestampEl.textContent =
+      `${data.date} 기준`;
+  }
+  else {
+    timestampEl.textContent = '';
+  }
+
+
+  /*
+   * 종목이 없는 경우
+   */
   if (!data.stocks || data.stocks.length === 0) {
+
     emptyEl.style.display = 'block';
+
     return;
   }
 
+  emptyEl.style.display = 'none';
+
+
+  /*
+   * 종목 출력
+   */
   data.stocks.forEach(raw => {
+
     const name = getDisplayName(raw);
 
+
+    // li
     const li = document.createElement('li');
+
     li.className = 'stock-item';
 
+
+    // 종목명
     const nameEl = document.createElement('div');
+
     nameEl.className = 'stock-name';
+
     nameEl.textContent = name;
 
+
+    // 버튼 그룹
     const btnGroup = document.createElement('div');
+
     btnGroup.className = 'btn-group';
 
+
+    // 네이버 검색 버튼
     const naverBtn = document.createElement('a');
+
     naverBtn.className = 'btn btn-naver';
+
     naverBtn.textContent = '네이버 검색';
-    naverBtn.href = `https://search.naver.com/search.naver?query=${encodeURIComponent(name + ' 주가')}`;
+
+    naverBtn.href =
+      `https://search.naver.com/search.naver?query=${
+        encodeURIComponent(name + ' 주가')
+      }`;
+
     naverBtn.target = '_blank';
 
+    naverBtn.rel = 'noopener noreferrer';
+
+
+    // 유튜브 검색 버튼
     const ytBtn = document.createElement('a');
+
     ytBtn.className = 'btn btn-youtube';
+
     ytBtn.textContent = '유튜브 검색';
-    ytBtn.href = `https://www.youtube.com/results?search_query=${encodeURIComponent(name)}`;
+
+    ytBtn.href =
+      `https://www.youtube.com/results?search_query=${
+        encodeURIComponent(name)
+      }`;
+
     ytBtn.target = '_blank';
 
+    ytBtn.rel = 'noopener noreferrer';
+
+
+    // 버튼 추가
     btnGroup.appendChild(naverBtn);
+
     btnGroup.appendChild(ytBtn);
+
+
+    // 종목명 + 버튼 추가
     li.appendChild(nameEl);
+
     li.appendChild(btnGroup);
+
+
+    // 목록에 추가
     listEl.appendChild(li);
+
   });
 }
 
-function loadData(jsonPath, prefix) {
-  fetch(jsonPath + '?_=' + Date.now())  // 캐시 방지용
-    .then(res => res.json())
-    .then(data => renderStocks(data, prefix))
+
+/*
+ * data.json 불러오기
+ *
+ * 캐시 방지를 위해 현재 시간을 붙임
+ */
+function loadData() {
+
+  fetch('data.json?_=' + Date.now())
+
+    .then(res => {
+
+      if (!res.ok) {
+        throw new Error(
+          `HTTP error: ${res.status}`
+        );
+      }
+
+      return res.json();
+
+    })
+
+    .then(data => {
+
+      renderStocks(data);
+
+    })
+
     .catch(err => {
-      document.getElementById(`timestamp-${prefix}`).textContent = '데이터를 불러올 수 없습니다.';
-      console.error(err);
+
+      console.error(
+        '데이터를 불러오는 중 오류:',
+        err
+      );
+
+      document.getElementById('timestamp').textContent =
+        '데이터를 불러올 수 없습니다.';
+
+      document.getElementById('errorMsg').style.display =
+        'block';
+
     });
 }
 
-// 두 기법 데이터 각각 독립적으로 로드
-loadData('data.json', 'breakout');
-loadData('screener_data.json', 'ma');
 
-// 탭 전환
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+/*
+ * 페이지 로딩 시 data.json 하나만 불러옴
+ */
+loadData();
 
-    btn.classList.add('active');
-    document.getElementById(`panel-${btn.dataset.tab}`).classList.add('active');
-  });
-});
 </script>
+
 </body>
 </html>
