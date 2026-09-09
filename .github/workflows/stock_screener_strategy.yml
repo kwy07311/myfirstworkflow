@@ -1,4 +1,4 @@
-name: 5일선 돌파
+name: 종목추출
 
 on:
   workflow_dispatch:
