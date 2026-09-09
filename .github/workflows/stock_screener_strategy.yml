@@ -3,44 +3,49 @@ name: 종목추출
 on:
   workflow_dispatch:
 
-# ⭐ 1. Git Push를 가능하게 하려면 쓰기 권한(write)이 필요합니다.
 permissions:
   contents: write
 
 jobs:
-  ma-reversal-scan:
+  stock-screener:
     runs-on: ubuntu-latest
+
     steps:
-      # 저장소 가져오기
+      # 1. 저장소 가져오기
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Python 설치
+      # 2. Python 설치
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 라이브러리 설치
+      # 3. 필요한 라이브러리 설치
       - name: Install packages
         run: |
           pip install pandas openpyxl requests numpy
 
-      # ⭐ 2. 암호화된 토큰 캐시가 있으면 복호화 (없으면 그냥 통과)
+      # 4. 암호화된 KIS 토큰 캐시 복호화
       - name: Decrypt cached token
         run: |
           if [ -f stock_screener/.token_state.enc ]; then
+            echo "암호화된 토큰 캐시 발견 → 복호화 시도"
+
             openssl enc -d -aes-256-cbc -pbkdf2 \
               -in stock_screener/.token_state.enc \
               -out stock_screener/.token_state.json \
               -pass pass:"${{ secrets.TOKEN_CACHE_KEY }}" \
-              || echo "복호화 실패 (키 변경 등) → 새로 발급됩니다"
+              || {
+                echo "복호화 실패 → 기존 토큰 캐시를 사용하지 않고 새로 발급합니다."
+                rm -f stock_screener/.token_state.json
+              }
           else
-            echo "캐시된 토큰 없음 → 새로 발급됩니다"
+            echo "암호화된 토큰 캐시 없음 → 새로 발급합니다."
           fi
 
-      # 5일 이평선 하향 + 양봉 종목 검색 실행
-      - name: Run MA reversal scan
+      # 5. 통합 종목 검색 실행
+      - name: Run stock screener
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
@@ -50,28 +55,62 @@ jobs:
           cd stock_screener
           python find_my_strategy.py
 
-      # ⭐ 3. 토큰 상태 파일을 다시 암호화하고, 평문 파일은 즉시 삭제
+      # 6. 토큰 상태 파일 다시 암호화
       - name: Encrypt token state
         if: always()
         run: |
           if [ -f stock_screener/.token_state.json ]; then
+
+            echo "토큰 상태 파일 암호화 중..."
+
             openssl enc -e -aes-256-cbc -pbkdf2 \
               -in stock_screener/.token_state.json \
               -out stock_screener/.token_state.enc \
               -pass pass:"${{ secrets.TOKEN_CACHE_KEY }}"
+
             rm -f stock_screener/.token_state.json
+
+            echo "토큰 상태 암호화 완료"
+
+          else
+            echo "암호화할 토큰 상태 파일이 없습니다."
           fi
 
-      # ⭐ 4. 새로 생성/수정된 docs/screener_data.json + 암호화된 토큰 캐시를 저장소에 커밋 & 푸시
-      - name: Commit and Push screener_data.json + token cache
+      # 7. data.json + 암호화된 토큰 캐시 저장
+      - name: Commit and Push data.json
         if: always()
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add docs/screener_data.json
+
+          # 통합 스크리너 결과
+          if [ -f docs/data.json ]; then
+            git add docs/data.json
+            echo "docs/data.json 추가됨"
+          else
+            echo "경고: docs/data.json 파일이 없습니다."
+          fi
+
+          # 암호화된 KIS 토큰 캐시
           if [ -f stock_screener/.token_state.enc ]; then
             git add stock_screener/.token_state.enc
+            echo "토큰 캐시 추가됨"
           fi
-          # 변경 사항이 있을 때만 커밋 (에러 방지용 || exit 0)
-          git commit -m "auto: update MA reversal screener_data.json" || exit 0
+
+          # 변경사항 확인
+          echo "===== Git 변경사항 ====="
+          git status --short
+
+          # 변경사항이 없으면 종료
+          if git diff --cached --quiet; then
+            echo "커밋할 변경사항이 없습니다."
+            exit 0
+          fi
+
+          # 커밋
+          git commit -m "auto: update stock screener data"
+
+          # GitHub에 push
           git push
+
+          echo "===== GitHub Push 완료 ====="
