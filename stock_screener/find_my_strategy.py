@@ -32,7 +32,7 @@ HISTORY_FILE = "input/mydata2.xlsx"
 RESULT_JSON = "../docs/data.json"
 
 # 토큰 캐시 파일 (이 스크립트 전용, 다른 스크립트의 캐시와 분리)
-TOKEN_STATE_FILE = ".token_state_find_my_strategy.json"
+TOKEN_STATE_FILE = ".token_state.json"
 
 # 만료 판단시 안전마진(분)
 TOKEN_SAFETY_MARGIN_MIN = 30
