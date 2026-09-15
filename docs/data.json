@@ -1,21 +1,13 @@
 {
   "date": "2026-09-15",
-  "time": "10:49:21",
+  "time": "15:19:59",
   "stocks": [
-    {
-      "name": "SK네트웍스_001740",
-      "matched_by": "A"
-    },
     {
       "name": "삼현_437730",
       "matched_by": "B"
     },
     {
       "name": "아이엠티_451220",
-      "matched_by": "A"
-    },
-    {
-      "name": "위츠_459100",
       "matched_by": "A"
     }
   ]
