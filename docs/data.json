@@ -1,22 +1,30 @@
 {
   "date": "2026-09-29",
-  "time": "09:08:07",
+  "time": "15:59:30",
   "stocks": [
     {
       "name": "태림포장_011280",
       "matched_by": "A"
     },
     {
+      "name": "케어젠_214370",
+      "matched_by": "A"
+    },
+    {
+      "name": "앱클론_174900",
+      "matched_by": "A"
+    },
+    {
+      "name": "현대바이오랜드_052260",
+      "matched_by": "B"
+    },
+    {
       "name": "위츠_459100",
       "matched_by": "A"
     },
     {
-      "name": "바이오인프라_199730",
-      "matched_by": "A"
-    },
-    {
-      "name": "형지I&C_011080",
-      "matched_by": "A"
+      "name": "동일기연_032960",
+      "matched_by": "B"
     }
   ]
 }
