@@ -25,7 +25,9 @@ button:disabled{opacity:.6;cursor:default;}
 .vol.busy{background:#fefcbf;}
 .vol.fail{border-color:#e53e3e;}
 </style></head><body>
-<div class="hd"><h2>종목 리스트 (<span id="cnt">677</span>개)</h2><div><button class="btn crawl" id="crawlBtn" onclick="crawlAll()">거래량 크롤링</button> <button class="btn exp" onclick="exportList()">내보내기</button></div></div>
+<div class="hd"><h2>종목 리스트 (<span id="cnt">677</span>개)</h2>
+<div><button class="btn crawl" id="crawlBtn" onclick="crawlAll()">거래량 크롤링</button>
+<button class="btn exp" onclick="exportList()">내보내기</button></div></div>
 <ul>
 <li data-name="APS" data-code="054620"><span class="name">APS</span><span class="code">054620</span><a class="btn naver" target="_blank" href="https://m.stock.naver.com/domestic/stock/054620/finance/annual">네이버</a><a class="btn chart" target="_blank" href="https://ssl.pstatic.net/imgfinance/chart/item/area/year10/054620.png">차트</a><a class="btn yt" target="_blank" href="https://www.youtube.com/results?search_query=APS+%EC%A3%BC%EA%B0%80">유튜브</a><button class="btn del" onclick="delItem(this)">삭제</button><div class="sub"><input class="vol" inputmode="numeric" placeholder="거래량" value="20074" oninput="volIn(this)"><input class="memo" placeholder="메모" oninput="memoIn(this)"></div></li>
 <li data-name="BGF" data-code="027410"><span class="name">BGF</span><span class="code">027410</span><a class="btn naver" target="_blank" href="https://m.stock.naver.com/domestic/stock/027410/finance/annual">네이버</a><a class="btn chart" target="_blank" href="https://ssl.pstatic.net/imgfinance/chart/item/area/year10/027410.png">차트</a><a class="btn yt" target="_blank" href="https://www.youtube.com/results?search_query=BGF+%EC%A3%BC%EA%B0%80">유튜브</a><button class="btn del" onclick="delItem(this)">삭제</button><div class="sub"><input class="vol" inputmode="numeric" placeholder="거래량" value="107577" oninput="volIn(this)"><input class="memo" placeholder="메모" oninput="memoIn(this)"></div></li>
@@ -722,20 +724,29 @@ if(j&&j.datas&&j.datas[0])v=j.datas[0].accumulatedTradingVolume;
 if(v==null&&j&&j.totalInfos){for(var k=0;k<j.totalInfos.length;k++){var t=j.totalInfos[k];
 if(t.code==='accumulatedTradingVolume'||t.key==='거래량'){v=t.value;break;}}}
 if(v==null)return null;v=String(v).replace(/\D/g,'');return v===''?null:v;}
+var route=null;
+var US=['https://polling.finance.naver.com/api/realtime/domestic/stock/','https://m.stock.naver.com/api/stock/'];
+var SF=['','/integration'];
+var PX=[function(u){return u;},function(u){return 'https://corsproxy.io/?'+encodeURIComponent(u);},function(u){return 'https://api.allorigins.win/raw?url='+encodeURIComponent(u);}];
+async function tryOne(code,a,b){var c=new AbortController();var t=setTimeout(function(){c.abort();},4000);
+try{var r=await fetch(PX[b](US[a]+code+SF[a]),{signal:c.signal});if(!r.ok)return null;
+var v=pick(await r.json());if(v!==null&&!route)route=[a,b];return v;}catch(e){return null;}finally{clearTimeout(t);}}
+function firstOk(ps){return new Promise(function(res){var n=ps.length;
+ps.forEach(function(p){p.then(function(v){if(v!==null)res(v);else if(--n===0)res(null);});});});}
 async function getVol(code){
-var us=['https://polling.finance.naver.com/api/realtime/domestic/stock/'+code,'https://m.stock.naver.com/api/stock/'+code+'/integration'];
-var px=[function(u){return u;},function(u){return 'https://corsproxy.io/?'+encodeURIComponent(u);},function(u){return 'https://api.allorigins.win/raw?url='+encodeURIComponent(u);}];
-for(var a=0;a<us.length;a++){for(var b=0;b<px.length;b++){
-try{var r=await fetch(px[b](us[a]));if(!r.ok)continue;var v=pick(await r.json());if(v!==null)return v;}catch(e){}
-}}return null;}
+if(route){var v=await tryOne(code,route[0],route[1]);if(v!==null)return v;route=null;}
+var ps=[];for(var a=0;a<US.length;a++){for(var b=0;b<PX.length;b++){ps.push(tryOne(code,a,b));}}
+return await firstOk(ps);}
 async function crawlAll(){
 var lis=[].slice.call(document.querySelectorAll('li'));var i=0,done=0,fail=0;
 var btn=document.getElementById('crawlBtn');btn.disabled=true;
-async function w(){while(i<lis.length){var li=lis[i++];var inp=li.querySelector('.vol');
+async function one(li){var inp=li.querySelector('.vol');
 inp.classList.add('busy');var v=await getVol(li.dataset.code);inp.classList.remove('busy');
 if(v!==null){inp.value=fmt(v);inp.classList.remove('fail');}else{inp.classList.add('fail');fail++;}
-done++;btn.textContent='크롤링 중 ('+done+'/'+lis.length+')';}}
-await Promise.all([w(),w(),w(),w()]);
+done++;btn.textContent='크롤링 중 ('+done+'/'+lis.length+')';}
+async function w(){while(i<lis.length){await one(lis[i++]);}}
+if(lis.length){await one(lis[i++]);}
+var ws=[];for(var n=0;n<10;n++)ws.push(w());await Promise.all(ws);
 btn.disabled=false;btn.textContent='거래량 크롤링';
 if(fail)alert(fail+'개 종목은 거래량을 가져오지 못했습니다. (빨간 테두리, 직접 입력 가능)');}
 function esc(s){s=String(s);return(s.indexOf(',')>=0||s.indexOf(Q)>=0||/[\r\n]/.test(s))?Q+s.split(Q).join(Q+Q)+Q:s;}
